@@ -103,8 +103,8 @@
   };
   let best        = LS.get("jjdx_best", 0);
   let selectedSkin= Math.min(SKINS.length-1, Math.max(0, LS.get("jjdx_skin", 0)));
-  let unlocked    = new Set(LS.get("jjdx_unlocked", [0,1,2,3,4]));
-  for (let i=0;i<5;i++) unlocked.add(i);                       // free skins always owned
+  let unlocked    = new Set();
+  for (let i=0;i<SKINS.length;i++) unlocked.add(i);            // all skins available for now (no purchase / sign-in gating)
   let profile     = LS.get("jjdx_profile", null);              // {name} or null
   const PHYS_VERSION = 16;                                     // bump whenever movement/gravity/input changes
   let bestRun     = LS.get("jjdx_bestrun", null);             // {seed, inputs, score, skin, phys}
@@ -241,13 +241,20 @@
   let state = "menu";   // menu | skins | play | replay | dead
   let menuIndex = 0, skinIndex = selectedSkin, skinsTab = "chars";
   let flashMsg = "", flashT = 0;
+  const REPLAY_SPEEDS = [1, 1.5, 2, 4, 6];
+  let replaySpeed = 1, _replayAcc = 0;
+  // AI practice difficulty → how skilled the rival shadows are
+  const DIFFS = { easy:  { base:0.16, spread:0.10, rand:0.16, cap:0.55 },
+                  normal:{ base:0.40, spread:0.13, rand:0.22, cap:0.92 },
+                  hard:  { base:0.66, spread:0.11, rand:0.22, cap:0.99 } };
+  let mpDiff = LS.get("jjdx_mpdiff", "normal");
+  if (!DIFFS[mpDiff]) mpDiff = "normal";
 
   function menuItems(){
     const it=[{id:"play",label:"▶  Play"},
-              {id:"mp",label:"⚔  Practice with Friends"},
+              {id:"mp",label:"🤖  Practice vs AI"},
               {id:"online",label:"🌐  Online (live)"},
-              {id:"skins",label:"Skins & Store"},
-              {id:"friends",label: profile ? "Friends" : "Sign in (Play Games)"}];
+              {id:"skins",label:"Skins & Store"}];
     if (bestRun) it.push({id:"replay",label:"Replay Best Run"});
     it.push({id:"about",label:"About"});
     return it;
@@ -268,7 +275,12 @@
       if (k === "Escape") abortToMenu();
       return;
     }
-    if (state === "replay") { if (k==="Escape"||k===" "||k==="Enter") state="menu"; return; }
+    if (state === "replay") {
+      if (k==="ArrowLeft"||k==="ArrowRight"){ let i=REPLAY_SPEEDS.indexOf(replaySpeed); if(i<0)i=0;
+        i=Math.max(0,Math.min(REPLAY_SPEEDS.length-1,i+(k==="ArrowRight"?1:-1))); replaySpeed=REPLAY_SPEEDS[i]; _replayAcc=0; AUD.tick(); return; }
+      if (k==="Escape"||k==="Enter") state="menu";
+      return;
+    }
     if (state === "lobby") {
       if (k === "ArrowUp" || k === "ArrowDown") { mpMode = mpMode==="race"?"time":"race"; LS.set("jjdx_mpmode",mpMode); AUD.tick(); }
       if (mpMode==="race" && k === "ArrowLeft")  { mpTarget=Math.max(25,mpTarget-25); LS.set("jjdx_mptarget",mpTarget); AUD.tick(); }
@@ -360,7 +372,7 @@
         touch.moveX = computeSteer(x);                                   // button/swipe steer the instant you press
         try { canvas.setPointerCapture(e.pointerId); } catch(_){}
       }
-    } else if (state === "replay") { state = "menu"; }
+    } else if (state === "replay") { if (!hitTest(x,y)) state = "menu"; }   // tap a speed button, or tap elsewhere to exit
     else hitTest(x,y);
   }, { passive:false });
   canvas.addEventListener("pointermove", e => {
@@ -391,7 +403,6 @@
     else if (id === "mp") { state = "lobby"; }
     else if (id === "online") { online = null; netConnect(); state = "online"; }
     else if (id === "skins") { skinIndex = selectedSkin; state = "skins"; }
-    else if (id === "friends") { state = "friends"; if (profile) pushToast("🔔","Marc just beat your best score — go again?"); }
     else if (id === "replay") startReplay();
     else if (id === "about") state = "about";
   }
@@ -507,7 +518,7 @@
     particles = []; shakeT = 0; bigMsg = ""; bigMsgT = 0; started = false; tut = 1;
   }
   function startPlay(){ reset(randomSeed(), startTheme); recording = []; replay = null; state = "play"; jumpBuf = 0; updateHint(); }
-  function startReplay(){ if (!bestRun) return; reset(bestRun.seed, bestRun.theme||0); replay = { inputs: bestRun.inputs, frame:0 }; state = "replay"; }
+  function startReplay(){ if (!bestRun) return; reset(bestRun.seed, bestRun.theme||0); replay = { inputs: bestRun.inputs, frame:0 }; replaySpeed = 1; _replayAcc = 0; state = "replay"; }
 
   // ----- multiplayer match lifecycle -----
   function makeActorAtStart(offset){
@@ -527,15 +538,16 @@
   }
   function startMatch(){
     reset(randomSeed(), startTheme); recording=[]; replay=null;
-    const fr = loadFriends().slice(0,4).map((f,i)=>({f,i})).filter(x=>mpInvited.has(x.i));  // only the friends you invited
-    mp = { mode:mpMode, target:mpTarget, timeLimit:5*60*60, frame:0, over:false, youDeaths:0, ghosts:[] };
-    mp.ghosts = fr.map((x,j)=>({
-      name:x.f.name, color:GHOST_COLORS[x.i%GHOST_COLORS.length],         // colour matches the lobby (keyed by original index)
+    const D = DIFFS[mpDiff] || DIFFS.normal;
+    const fr = loadFriends().slice(0,4);                 // 4 AI rivals to race against
+    mp = { mode:mpMode, target:mpTarget, diff:mpDiff, timeLimit:5*60*60, frame:0, over:false, youDeaths:0, ghosts:[] };
+    mp.ghosts = fr.map((f,j)=>({
+      name:f.name, color:GHOST_COLORS[j%GHOST_COLORS.length],
       a: makeActorAtStart((j-(fr.length-1)/2)*26),
-      skill: Math.min(0.97, 0.40 + j*0.13 + Math.random()*0.22),  // a spread of paces to race against
+      skill: Math.min(D.cap, D.base + j*D.spread + Math.random()*D.rand),   // difficulty sets the AI pace
       highFloor:0, score:0, combo:0, comboTimer:0, finishFrame:-1, tSeed:Math.random()*1000
     }));
-    state="mp"; jumpBuf=0; started=true; updateHint();   // multiplayer starts immediately (no floor-0 wait — friends are racing)
+    state="mp"; jumpBuf=0; started=true; updateHint();   // starts immediately (no floor-0 wait — the rivals are racing)
   }
   function endMatch(reason){
     if (!mp || mp.over) return;
@@ -919,7 +931,18 @@
       ctx.fillStyle="rgba(255,255,255,0.14)"; roundRect(bx,by,bw,5,2.5); ctx.fill();
       ctx.fillStyle=cyc>0.82?"#ff6b6b":"#7fd0ff"; roundRect(bx,by,bw*cyc,5,2.5); ctx.fill();
       ctx.fillStyle="#8fb6e8"; ctx.font="10px Trebuchet MS"; ctx.fillText("SPEED "+(speedLevel+1), tx, by+18); }
-    if (state==="replay"){ ctx.textAlign="right"; ctx.fillStyle="#ffd34d"; ctx.font="bold 14px Trebuchet MS"; ctx.fillText("▶ REPLAY  (Esc to exit)",W-30,40); ctx.textAlign="left"; }
+    if (state==="replay"){
+      ctx.textAlign="right"; ctx.fillStyle="#ffd34d"; ctx.font="bold 14px Trebuchet MS"; ctx.fillText("▶ REPLAY  x"+replaySpeed+"  (Esc to exit)",W-30,40); ctx.textAlign="left";
+      const sp=REPLAY_SPEEDS, bw=46, bh=28, gap=7, totW=sp.length*bw+(sp.length-1)*gap, x0=W/2-totW/2, yb=H-46;
+      ctx.textAlign="center"; ctx.fillStyle="#8fb6e8"; ctx.font="11px Trebuchet MS"; ctx.fillText("PLAYBACK SPEED", W/2, yb-9);
+      for (let i=0;i<sp.length;i++){ const bx=x0+i*(bw+gap), seld=replaySpeed===sp[i];
+        ctx.fillStyle=seld?"rgba(95,160,255,0.30)":"rgba(255,255,255,0.10)"; roundRect(bx,yb,bw,bh,7); ctx.fill();
+        if (seld){ ctx.strokeStyle="#9fe6b0"; ctx.lineWidth=1.5; roundRect(bx,yb,bw,bh,7); ctx.stroke(); }
+        ctx.fillStyle=seld?"#fff":"#cfe0ff"; ctx.font="bold 13px Trebuchet MS"; ctx.fillText("x"+sp[i],bx+bw/2,yb+19);
+        hot(bx,yb,bw,bh, ((v)=>()=>{ replaySpeed=v; _replayAcc=0; AUD.tick(); })(sp[i]));
+      }
+      ctx.textAlign="left";
+    }
     if (combo>0){
       const bx=36,by=72,bw=160,bh=12;
       ctx.fillStyle="rgba(255,255,255,0.15)"; roundRect(bx,by,bw,bh,6); ctx.fill();
@@ -978,8 +1001,6 @@
     ctx.fillStyle="#cfeaff"; roundRect(W/2-50,H*0.46+44,100,12,6); ctx.fill();
     drawCharacter(px-22,py,44,58,SKINS[selectedSkin],1,{forward:true});
     drawTitle(W/2,H*0.2);
-    ctx.textAlign="center"; ctx.fillStyle="#9bb8e0"; ctx.font="13px Trebuchet MS";
-    ctx.fillText((isTouch?"drag to steer":"arrow keys")+" · chain combos for big air", W/2, H*0.2+30);
     { const sy=H*0.2+56, ax=110;                // music-track selector — arrows at fixed x so hit zones align
       ctx.fillStyle="#9fe6b0"; ctx.font="bold 14px Trebuchet MS"; ctx.textAlign="center";
       ctx.fillText("♪ Music: "+TRACKS[selectedTrack].name, W/2, sy);
@@ -1200,8 +1221,8 @@
   }
   function drawLobby(){
     drawBackground(true); panel(0.88);
-    ctx.textAlign="center"; ctx.fillStyle="#fff"; ctx.font="bold 23px Trebuchet MS"; ctx.fillText("PLAY WITH FRIENDS", W/2, 50);
-    ctx.fillStyle="#8fb6e8"; ctx.font="12px Trebuchet MS"; ctx.fillText("same tower · friend shadows · height minimap", W/2, 70);
+    ctx.textAlign="center"; ctx.fillStyle="#fff"; ctx.font="bold 23px Trebuchet MS"; ctx.fillText("PRACTICE VS AI", W/2, 50);
+    ctx.fillStyle="#8fb6e8"; ctx.font="12px Trebuchet MS"; ctx.fillText("same tower · AI rivals · height minimap", W/2, 70);
     const modes=[["race","⚔  RACE","First to floor "+mpTarget],["time","⏱  SCORE RUSH","Most points in 5:00"]];
     for (let i=0;i<2;i++){ const m=modes[i], y=88+i*78, sel=mpMode===m[0];
       ctx.fillStyle=sel?"rgba(95,160,255,0.22)":"rgba(255,255,255,0.05)"; roundRect(40,y,W-80,66,10); ctx.fill();
@@ -1220,25 +1241,20 @@
       hot(W-152,y+14,34,38, ()=>{ mpTarget=Math.max(25,mpTarget-25); LS.set("jjdx_mptarget",mpTarget); AUD.tick(); });
       hot(W-72, y+14,34,38, ()=>{ mpTarget=Math.min(500,mpTarget+25); LS.set("jjdx_mptarget",mpTarget); AUD.tick(); });
     }
-    // ---- invite friends — in the app these are your real Google Play Games / Game Center friends ----
-    ctx.textAlign="left"; ctx.fillStyle="#7f9cc8"; ctx.font="bold 12px Trebuchet MS"; ctx.fillText("INVITE FRIENDS", 44, 260);
-    ctx.textAlign="right";
-    if (profile){ ctx.fillStyle="#9fe6b0"; ctx.font="11px Trebuchet MS"; ctx.fillText("◉ "+profile.name, W-44, 260); }
-    else { ctx.fillStyle="#ffd34d"; ctx.font="bold 11px Trebuchet MS"; ctx.fillText("🎮 Sign in ›", W-44, 260);
-           hot(W-130, 247, 88, 18, ()=>{ signIn(); }); }
-    const fr=loadFriends().slice(0,4);
-    for (let i=0;i<fr.length;i++){ const y=272+i*38, col=GHOST_COLORS[i%GHOST_COLORS.length], inv=mpInvited.has(i);
-      ctx.fillStyle = inv ? "rgba(95,160,255,0.14)" : "rgba(255,255,255,0.04)"; roundRect(40,y,W-80,32,8); ctx.fill();
-      if (inv){ ctx.strokeStyle="rgba(159,230,176,0.45)"; ctx.lineWidth=1; roundRect(40,y,W-80,32,8); ctx.stroke(); }
-      ctx.beginPath(); ctx.arc(60,y+16,8,0,7); ctx.lineWidth=2; ctx.strokeStyle=inv?"#9fe6b0":"#5e7aa8"; ctx.stroke();   // invite checkbox
-      if (inv){ ctx.fillStyle="#9fe6b0"; ctx.font="bold 11px Trebuchet MS"; ctx.textAlign="center"; ctx.fillText("✓",60,y+20); }
-      ctx.fillStyle=col; ctx.beginPath(); ctx.arc(84,y+16,5,0,7); ctx.fill();                                          // their shadow colour
-      ctx.textAlign="left"; ctx.fillStyle=inv?"#eaf2ff":"#8fa8c8"; ctx.font="14px Trebuchet MS"; ctx.fillText(fr[i].name, 100, y+21);
-      ctx.textAlign="right"; ctx.fillStyle=inv?"#9fe6b0":"#7f9cc8"; ctx.font="11px Trebuchet MS"; ctx.fillText(inv?"invited":"tap to invite", W-56, y+21);
-      hot(40,y,W-80,32, ((idx)=>()=>{ if(mpInvited.has(idx))mpInvited.delete(idx); else mpInvited.add(idx); AUD.tick(); })(i));
+    // ---- AI difficulty ----
+    ctx.textAlign="left"; ctx.fillStyle="#7f9cc8"; ctx.font="bold 12px Trebuchet MS"; ctx.fillText("AI DIFFICULTY", 44, 262);
+    const diffs=[["easy","EASY"],["normal","NORMAL"],["hard","HARD"]];
+    const dgap=10, dw=(W-80-2*dgap)/3, dyy=274;
+    for (let i=0;i<3;i++){ const dx=40+i*(dw+dgap), sel=mpDiff===diffs[i][0];
+      ctx.fillStyle=sel?"rgba(95,160,255,0.22)":"rgba(255,255,255,0.05)"; roundRect(dx,dyy,dw,48,9); ctx.fill();
+      ctx.strokeStyle=sel?"#9fe6b0":"rgba(255,255,255,0.12)"; ctx.lineWidth=sel?2:1; roundRect(dx,dyy,dw,48,9); ctx.stroke();
+      ctx.textAlign="center"; ctx.fillStyle=sel?"#fff":"#cfe0ff"; ctx.font="bold 15px Trebuchet MS"; ctx.fillText(diffs[i][1],dx+dw/2,dyy+29);
+      hot(dx,dyy,dw,48, ((dd)=>()=>{ if(mpDiff!==dd){ mpDiff=dd; LS.set("jjdx_mpdiff",dd); AUD.tick(); } })(diffs[i][0]));
     }
-    ctx.fillStyle="#5e7aa8"; ctx.font="10px Trebuchet MS"; ctx.textAlign="center";
-    ctx.fillText("in the app: invite real friends via Google Play Games · Game Center", W/2, 272+4*38+8);
+    ctx.fillStyle="#9bb8e0"; ctx.font="12px Trebuchet MS"; ctx.textAlign="center";
+    ctx.fillText(mpDiff==="easy" ? "4 relaxed rivals — great for learning the ropes"
+               : mpDiff==="hard" ? "4 fast rivals — they chain big combos, good luck"
+               :                    "4 rivals at a balanced, competitive pace", W/2, dyy+72);
     drawButton(W/2-110, H-78, 220, 46, "START MATCH", "#9fe6b0");
     hot(W/2-110, H-78, 220, 46, ()=>{ AUD.select(); startMatch(); });
     backButton(); flashLine();
@@ -1444,7 +1460,10 @@
     while (_acc >= SIM_DT && steps < 5){     // catch up in fixed steps (capped so we never spiral)
       T++;
       if (flashT>0) flashT-=0.016;
-      update();
+      if (state==="replay"){                 // replay can play back faster (x1.5 … x6): run extra sim steps
+        _replayAcc += replaySpeed;
+        while (_replayAcc >= 1){ update(); _replayAcc -= 1; if (state!=="replay") break; }
+      } else update();
       _acc -= SIM_DT; steps++;
     }
 
