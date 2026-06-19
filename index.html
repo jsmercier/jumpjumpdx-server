@@ -1,0 +1,1465 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+<title>Jump Jump DX</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #070b14;
+    font-family: "Trebuchet MS", "Segoe UI", system-ui, sans-serif;
+    overflow: hidden;
+    user-select: none;
+  }
+  #wrap { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
+  #game {
+    position: relative;
+    /* size is set by JS (fitGame) to scale the canvas to fit the screen, centered */
+    box-shadow: 0 0 60px rgba(80,160,255,.25), 0 0 0 2px #1b2740;
+    border-radius: 10px;
+    overflow: hidden;
+    background: #0d1424;
+  }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+  #hint {
+    position: absolute; bottom: 8px; left: 0; right: 0;
+    text-align: center; color: #6f8ec0; font-size: 12px;
+    pointer-events: none; letter-spacing: .4px;
+  }
+  #codein {
+    position: absolute; left: 50%; top: 41%; transform: translate(-50%,-50%);
+    display: none; width: 170px; padding: 12px 8px; box-sizing: border-box;
+    text-align: center; font: bold 26px "Trebuchet MS", sans-serif;
+    letter-spacing: 8px; text-transform: uppercase; color: #fff;
+    background: #0d1424; border: 2px solid #5fb4ff; border-radius: 10px; outline: none;
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="game">
+    <canvas id="c"></canvas>
+    <div id="hint">swipe / drag left & right to steer  ·  auto-jumps on landing  ·  M music</div>
+    <input id="codein" type="text" maxlength="4" autocapitalize="characters" autocomplete="off" spellcheck="false" placeholder="CODE" />
+  </div>
+</div>
+<script>
+(() => {
+  "use strict";
+
+  // ===== Config ==============================================================
+  const W = 480;
+  // H matches the device screen's aspect so the game fills it (no letterbox = more of the tower
+  // visible + more reaction room), clamped so it's never shorter than the original 2:3 nor absurdly tall.
+  const H = Math.round(Math.min(1160, Math.max(720, W * (window.innerHeight||720) / (window.innerWidth||480))));
+  const WALL = 24, PLAY_L = WALL, PLAY_R = W - WALL;
+  const FLOOR_H = 64, PLAT_H = 14;   // taller floor pitch ≈ original's ~6.6-floors-wide field
+  // PACE = real-time speed multiplier. Base numbers are the 60Hz "unit" feel; motion runs PACE× faster
+  // in real time while jump ARCS and platform spacing stay identical (velocities ×PACE, accelerations
+  // ×PACE²). This restores the lively pace the old frame-locked loop gave on high-refresh phones — and
+  // since the loop is now framerate-independent, it feels the same on every device. Tune this one number.
+  const PACE = 2.0;
+  const GRAVITY = 0.38 * PACE*PACE;             // lighter fall = more hang time to react between bounces
+  // Super-Mario-style horizontal movement (locked-in feel)
+  const WALK_MAX = 4.2 * PACE, RUN_MAX = 7.0 * PACE;   // jumps/wall-bounces stay navigable
+  const GROUND_ACCEL = 0.30 * PACE*PACE, AIR_ACCEL = 0.24 * PACE*PACE;   // air control so max speed is reachable
+  const RELEASE_DECEL = 0.22 * PACE*PACE, SKID_DECEL = 0.62 * PACE*PACE;
+  const BASE_JUMP = 10.8 * PACE;
+  const SPEED_JUMP = 0.80;   // ratio (vx → extra jump height): dimensionless, so NOT pace-scaled — keeps jump apex constant at any speed/PACE
+  const JUMP_BUF = 10, COYOTE = 8;   // Celeste-style jump forgiveness (frames @60Hz): press-early buffer + late "coyote" grace after leaving the floor
+  const WALL_LIFT = 0.75, WALL_LIFT_MAX = 10 * PACE;   // a fast wall-bounce WHILE FALLING converts speed→upward lift (Icy-Tower wall-climb / recovery; ratio not pace-scaled, cap is a velocity)
+  const JUMP_BR = 36, JUMP_BX = W - 58, JUMP_BY = H - 92;   // on-screen JUMP button (Button control scheme)
+  const PLAYER_W = 30, PLAYER_H = 40;
+
+  // ===== Skins (5 free + 10 premium) ========================================
+  // premium flair: grad=gradient body, glow=aura colour, band=headband,
+  // sparkle=orbiting sparkles, hue=rainbow hue-cycle
+  const SKINS = [
+    // --- free ---
+    { name:"Harold", body:"#ffcf3f", accent:"#e8a91d", eye:"#222222", premium:false },
+    { name:"Otto",   body:"#ff6b6b", accent:"#c94444", eye:"#3a1414", premium:false },
+    { name:"Mike",   body:"#6fd06f", accent:"#3f9b3f", eye:"#173417", premium:false },
+    { name:"Bob",    body:"#5fb4ff", accent:"#2f7fd8", eye:"#13283f", premium:false },
+    { name:"Penny",  body:"#ff8fc8", accent:"#d85fa0", eye:"#4a1d38", band:"#ffe14d", premium:false },
+    // --- premium ($2 each) ---
+    { name:"Ninja",   body:"#3a3f55", accent:"#20232f", eye:"#ff5555", band:"#cc2b2b", premium:true, price:2 },
+    { name:"Frost",   body:"#dff4ff", accent:"#9cd3f0", eye:"#2a5a78", grad:"#7fb9e6", glow:"#aee6ff", sparkle:true, premium:true, price:2 },
+    { name:"Magma",   body:"#ffb04a", accent:"#d6470f", eye:"#3a1400", grad:"#ff5a1e", glow:"#ff7a2a", sparkle:true, premium:true, price:2 },
+    { name:"Gold",    body:"#ffe680", accent:"#c69a16", eye:"#5a3d00", grad:"#e6b32e", glow:"#ffe9a0", sparkle:true, premium:true, price:2 },
+    { name:"Neon",    body:"#3ef0d8", accent:"#c81ff0", eye:"#06222a", grad:"#9b2bff", glow:"#5ffbe0", sparkle:true, premium:true, price:2 },
+    { name:"Galaxy",  body:"#5a3bd6", accent:"#2a1a6e", eye:"#cfe0ff", grad:"#1a1140", glow:"#7a5cff", sparkle:true, premium:true, price:2 },
+    { name:"Phantom", body:"#bfe0ff", accent:"#7fa8d8", eye:"#22384f", glow:"#bfe0ff", ghosty:true, premium:true, price:2 },
+    { name:"Robot",   body:"#b9c2cc", accent:"#7c8794", eye:"#37e0ff", band:"#37e0ff", grad:"#8d97a3", glow:"#37e0ff", premium:true, price:2 },
+    { name:"Royal",   body:"#8a4bd6", accent:"#5a2a9e", eye:"#ffe14d", band:"#ffd34d", grad:"#5e2fa0", sparkle:true, premium:true, price:2 },
+    { name:"Rainbow", body:"#ff5fa2", accent:"#d83f7f", eye:"#222", hue:true, sparkle:true, glow:"#ffffff", premium:true, price:2 },
+  ];
+
+  // ===== Persistence =========================================================
+  const LS = {
+    get:(k,d)=>{ try{ const v=localStorage.getItem(k); return v==null?d:JSON.parse(v);}catch(e){return d;} },
+    set:(k,v)=>{ try{ localStorage.setItem(k, JSON.stringify(v)); }catch(e){} },
+  };
+  let best        = LS.get("jjdx_best", 0);
+  let selectedSkin= Math.min(SKINS.length-1, Math.max(0, LS.get("jjdx_skin", 0)));
+  let unlocked    = new Set(LS.get("jjdx_unlocked", [0,1,2,3,4]));
+  for (let i=0;i<5;i++) unlocked.add(i);                       // free skins always owned
+  let profile     = LS.get("jjdx_profile", null);              // {name} or null
+  const PHYS_VERSION = 16;                                     // bump whenever movement/gravity/input changes
+  let bestRun     = LS.get("jjdx_bestrun", null);             // {seed, inputs, score, skin, phys}
+  if (bestRun && bestRun.phys !== PHYS_VERSION) bestRun = null; // old physics -> replay would desync, drop it
+  let friends     = LS.get("jjdx_friends", null);
+  function saveUnlocked(){ LS.set("jjdx_unlocked", [...unlocked]); }
+  function loadFriends(){
+    if (friends) return friends;
+    const pool=["IcyAce","SkyHopper","ComboKid","Nimbus","PixelPenguin","Blizzard","Skyla","TowerRat"];
+    friends = pool.sort(()=>Math.random()-0.5).slice(0,5)
+                  .map(n=>({name:n, score:300+Math.floor(Math.random()*2400)}));
+    LS.set("jjdx_friends", friends);
+    return friends;
+  }
+
+  // ===== Audio: procedural chiptune + SFX (inspired by the original) =========
+  let actx=null, master=null, musicGain=null, sfxGain=null;
+  let muted = LS.get("jjdx_muted", false);
+  let musicOn = true;
+  let selectedTrack = LS.get("jjdx_track", 0);   // chosen music style
+  const midi = m => 440 * Math.pow(2,(m-69)/12);
+  const TRACKS = [
+    { name:"Trance",   bpm:138, lead:"sawtooth", bass:"triangle", bassMode:"roll",    arp:[0,1,2,3,4,3,2,1],
+      prog:[{b:45,c:[57,60,64]},{b:41,c:[53,57,60]},{b:48,c:[52,55,60]},{b:43,c:[55,59,62]}] },
+    { name:"Pop",      bpm:116, lead:"square",   bass:"triangle", bassMode:"octave",  arp:[0,2,4,2,1,4,2,0],
+      prog:[{b:48,c:[60,64,67]},{b:43,c:[55,59,62]},{b:45,c:[57,60,64]},{b:41,c:[53,57,60]}] },
+    { name:"Hardcore", bpm:170, lead:"sawtooth", bass:"sawtooth", bassMode:"offbeat", arp:[0,2,4,2,1,2,4,5],
+      prog:[{b:45,c:[57,60,64]},{b:50,c:[57,62,66]},{b:53,c:[60,65,69]},{b:52,c:[59,64,67]}] },
+    { name:"Chiptune", bpm:152, lead:"square",   bass:"triangle", bassMode:"octave",  arp:[0,2,4,5,4,2,1,0],
+      prog:[{b:48,c:[60,64,67]},{b:43,c:[59,62,67]},{b:45,c:[57,60,64]},{b:41,c:[60,65,69]}] },
+    { name:"Disco",    bpm:122, lead:"square",   bass:"sawtooth", bassMode:"octave",  arp:[0,1,2,1,4,5,4,2],
+      prog:[{b:45,c:[57,60,64]},{b:50,c:[57,62,65]},{b:43,c:[55,59,62]},{b:48,c:[60,64,67]}] },
+  ];
+
+  function ensureAudio(){
+    if (actx){ if (actx.state==="suspended") actx.resume(); return; }
+    try{ actx = new (window.AudioContext||window.webkitAudioContext)(); }catch(e){ return; }
+    master = actx.createGain();    master.gain.value = muted?0:0.85; master.connect(actx.destination);
+    musicGain = actx.createGain(); musicGain.gain.value = 0.13;        musicGain.connect(master);
+    sfxGain  = actx.createGain();  sfxGain.gain.value  = 0.30;         sfxGain.connect(master);
+    startMusic();
+  }
+  function tone(type,freq,t,dur,vol,dest,slideTo){
+    const o=actx.createOscillator(), g=actx.createGain();
+    o.type=type; o.frequency.setValueAtTime(freq,t);
+    if (slideTo) o.frequency.exponentialRampToValueAtTime(Math.max(20,slideTo),t+dur);
+    g.gain.setValueAtTime(0.0001,t); g.gain.linearRampToValueAtTime(vol,t+0.008);
+    g.gain.exponentialRampToValueAtTime(0.0001,t+dur);
+    o.connect(g).connect(dest||sfxGain); o.start(t); o.stop(t+dur+0.03);
+  }
+  function noiseHit(t,dur,vol,freq,ftype,dest){
+    const len=Math.max(1,Math.floor(actx.sampleRate*dur));
+    const b=actx.createBuffer(1,len,actx.sampleRate), d=b.getChannelData(0);
+    for(let i=0;i<len;i++) d[i]=Math.random()*2-1;
+    const s=actx.createBufferSource(); s.buffer=b;
+    const f=actx.createBiquadFilter(); f.type=ftype||"highpass"; f.frequency.value=freq||6000;
+    const g=actx.createGain(); g.gain.setValueAtTime(vol,t); g.gain.exponentialRampToValueAtTime(0.0001,t+dur);
+    s.connect(f).connect(g).connect(dest||sfxGain); s.start(t); s.stop(t+dur+0.02);
+  }
+  function kick(t,v){ const o=actx.createOscillator(),g=actx.createGain(); o.type="sine"; o.frequency.setValueAtTime(165,t); o.frequency.exponentialRampToValueAtTime(46,t+0.11); g.gain.setValueAtTime(v||0.62,t); g.gain.exponentialRampToValueAtTime(0.0001,t+0.15); o.connect(g).connect(musicGain); o.start(t); o.stop(t+0.17); }
+  function snare(t){ noiseHit(t,0.13,0.20,2200,"bandpass",musicGain); const o=actx.createOscillator(),g=actx.createGain(); o.type="triangle"; o.frequency.value=210; g.gain.setValueAtTime(0.16,t); g.gain.exponentialRampToValueAtTime(0.0001,t+0.09); o.connect(g).connect(musicGain); o.start(t); o.stop(t+0.1); }
+  function hat(t,open){ noiseHit(t, open?0.08:0.028, open?0.09:0.07, 9000,"highpass",musicGain); }
+  let nextT=0, curStep=0, schedTimer=null;
+  function stepDur(){ return (60/TRACKS[selectedTrack].bpm)/4; }
+  function scheduleStep(step,t){
+    const TR=TRACKS[selectedTrack], bar=Math.floor(step/16)%4, s=step%16, P=TR.prog[bar], sd=stepDur();
+    if (s%4===0) kick(t);                                   // four-on-the-floor
+    if (s===4||s===12) snare(t);                            // backbeat on 2 & 4
+    if (s%2===1) hat(t, s===6||s===14);                     // offbeat hats (open on some)
+    if (TR.bassMode==="offbeat"){ if (s%2===1) tone(TR.bass, midi(P.b+(s%4===3?12:0)), t, sd*0.85, 0.42, musicGain); }
+    else if (TR.bassMode==="roll"){ tone(TR.bass, midi(P.b+((s%4===0)?0:12)), t, sd*1.05, 0.30, musicGain); }
+    else { if (s%2===0) tone(TR.bass, midi(P.b+((s%4===0)?0:12)), t, sd*1.5, 0.40, musicGain); }
+    if (s%2===0){ const e=(s/2)%8, i=TR.arp[e], n=P.c[i%3]+12*Math.floor(i/3)+12;   // lead arpeggio
+      tone(TR.lead, midi(n), t, sd*1.25, TR.lead==="sawtooth"?0.12:0.16, musicGain);
+      if (TR.lead==="sawtooth") tone(TR.lead, midi(n)*1.005, t, sd*1.25, 0.08, musicGain); }
+  }
+  function startMusic(){
+    if (!actx || schedTimer) return;
+    curStep=0; nextT=actx.currentTime+0.1;
+    schedTimer=setInterval(()=>{
+      if (!actx) return;
+      if (!musicOn || muted){ nextT=actx.currentTime+0.05; return; }
+      while (nextT < actx.currentTime+0.12){ scheduleStep(curStep,nextT); nextT+=stepDur(); curStep=(curStep+1)%64; }
+    },25);
+  }
+  function toggleMute(){ muted=!muted; LS.set("jjdx_muted",muted); if (master) master.gain.setValueAtTime(muted?0:0.85, actx.currentTime); }
+  function cycleTrack(dir){ selectedTrack=(selectedTrack+dir+TRACKS.length)%TRACKS.length; LS.set("jjdx_track",selectedTrack); if(actx)AUD.tick(); }
+
+  const AUD = {
+    jump(){    if(!actx||muted)return; const t=actx.currentTime; tone("square",260,t,0.14,0.16,sfxGain,560); },
+    bounce(){  if(!actx||muted)return; const t=actx.currentTime; tone("square",520,t,0.10,0.22,sfxGain,300); },
+    land(){    if(!actx||muted)return; const t=actx.currentTime; tone("triangle",200,t,0.09,0.2,sfxGain,120); },
+    combo(n){  if(!actx||muted)return; const t=actx.currentTime, k=Math.min(8,n);
+               for(let i=0;i<k;i++) tone("square",midi(64+i*2),t+i*0.045,0.12,0.2,sfxGain); },
+    fanfare(){ if(!actx||muted)return; const t=actx.currentTime; [0,4,7,12,16].forEach((s,i)=>tone("square",midi(72+s),t+i*0.06,0.18,0.22,sfxGain)); },
+    gameOver(){if(!actx||muted)return; const t=actx.currentTime; [72,69,65,60,55].forEach((m,i)=>tone("triangle",midi(m),t+i*0.12,0.22,0.25,sfxGain)); },
+    tick(){    if(!actx||muted)return; const t=actx.currentTime; tone("square",420,t,0.04,0.12,sfxGain); },
+    select(){  if(!actx||muted)return; const t=actx.currentTime; tone("square",520,t,0.08,0.2,sfxGain); tone("square",780,t+0.07,0.12,0.2,sfxGain); },
+    coin(){    if(!actx||muted)return; const t=actx.currentTime; tone("square",988,t,0.08,0.22,sfxGain); tone("square",1319,t+0.07,0.16,0.22,sfxGain); },
+    alert(){   if(!actx||muted)return; const t=actx.currentTime; [620,820,1040].forEach((f,i)=>tone("square",f,t+i*0.09,0.13,0.22,sfxGain)); },  // "speeding up" rising siren
+    newfloor(){if(!actx||muted)return; const t=actx.currentTime; [0,4,7,11,12,16].forEach((s,i)=>tone("triangle",midi(67+s),t+i*0.055,0.22,0.2,sfxGain)); noiseHit(t,0.3,0.10,7000,"highpass",sfxGain); },  // reached a new floor type
+  };
+
+  // ===== Seeded RNG (deterministic levels -> enables replay/ghosts) ==========
+  function mulberry32(a){ return function(){ a|=0; a=a+0x6D2B79F5|0; let t=Math.imul(a^a>>>15,1|a);
+    t=t+Math.imul(t^t>>>7,61|t)^t; return ((t^t>>>14)>>>0)/4294967296; }; }
+  let rng = Math.random, runSeed = 0;
+
+  // ===== Canvas ==============================================================
+  const canvas = document.getElementById("c");
+  canvas.width = W; canvas.height = H;
+  const ctx = canvas.getContext("2d");
+  const hintEl = document.getElementById("hint");
+  const gameEl = document.getElementById("game");
+  const codeinEl = document.getElementById("codein");
+  function fitGame(){                                   // scale the W×H canvas to fill the screen, centered (no distortion)
+    const s = Math.min((window.innerWidth||W)/W, (window.innerHeight||H)/H);
+    gameEl.style.width = Math.round(W*s)+"px"; gameEl.style.height = Math.round(H*s)+"px";
+  }
+  addEventListener("resize", fitGame); addEventListener("orientationchange", fitGame); fitGame();
+
+  // ===== Input ===============================================================
+  const keys = { left:false, right:false, jump:false, run:false };
+  const touch = { active:false, id:-1, startX:0, startY:0, refY:0, moveX:0 };   // drag steering (analog -1..1) + flick
+  const isTouch = !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches);   // touch device vs desktop
+  const CONTROL_SCHEMES = isTouch ? ["auto","bdrag","bsteer","swipe"] : ["desktop","auto"];   // schemes offered per device
+  let controlMode = LS.get("jjdx_control", isTouch ? "auto" : "desktop");   // "desktop"|"auto"|"bdrag"|"bsteer"|"swipe"
+  if (controlMode==="button") controlMode="bdrag";    // migrate old saved value
+  if (!CONTROL_SCHEMES.includes(controlMode)) controlMode = CONTROL_SCHEMES[0];   // fall back to this device's default
+  let jumpBuf = 0;                                     // manual-jump buffer (frames) — lets you press just before landing
+  let started = false, tut = 1;                        // run begins (camera/auto-jump) on first jump; tutorial fades then
+  const isButton = () => controlMode==="bdrag" || controlMode==="bsteer";
+
+  let state = "menu";   // menu | skins | play | replay | dead
+  let menuIndex = 0, skinIndex = selectedSkin, skinsTab = "chars";
+  let flashMsg = "", flashT = 0;
+
+  function menuItems(){
+    const it=[{id:"play",label:"▶  Play"},
+              {id:"mp",label:"⚔  Practice with Friends"},
+              {id:"online",label:"🌐  Online (live)"},
+              {id:"skins",label:"Skins & Store"},
+              {id:"friends",label: profile ? "Friends" : "Sign in (Play Games)"}];
+    if (bestRun) it.push({id:"replay",label:"Replay Best Run"});
+    it.push({id:"about",label:"About"});
+    return it;
+  }
+
+  addEventListener("keydown", e => {
+    if (codeinEl && document.activeElement===codeinEl) return;   // let the room-code field type freely
+    const k = e.key;
+    ensureAudio();
+    if (k === "m" || k === "M") { toggleMute(); return; }
+    if (["ArrowLeft","ArrowRight","ArrowUp","ArrowDown"," ","Spacebar"].includes(k)) e.preventDefault();
+
+    if (state === "play" || state === "mp") {
+      if (k === "ArrowLeft") keys.left = true;
+      if (k === "ArrowRight") keys.right = true;
+      if (k === "ArrowUp" || k === " " || k === "Spacebar") { keys.jump = true; requestJump(); }
+      if (k === "Shift") keys.run = true;
+      if (k === "Escape") abortToMenu();
+      return;
+    }
+    if (state === "replay") { if (k==="Escape"||k===" "||k==="Enter") state="menu"; return; }
+    if (state === "lobby") {
+      if (k === "ArrowUp" || k === "ArrowDown") { mpMode = mpMode==="race"?"time":"race"; LS.set("jjdx_mpmode",mpMode); AUD.tick(); }
+      if (mpMode==="race" && k === "ArrowLeft")  { mpTarget=Math.max(25,mpTarget-25); LS.set("jjdx_mptarget",mpTarget); AUD.tick(); }
+      if (mpMode==="race" && k === "ArrowRight") { mpTarget=Math.min(500,mpTarget+25); LS.set("jjdx_mptarget",mpTarget); AUD.tick(); }
+      if (k === "Enter" || k === " ") { AUD.select(); startMatch(); }
+      if (k === "Escape" || k === "Backspace") state = "menu";
+      return;
+    }
+    if (state === "mpend") {
+      if (k === "Enter" || k === " ") { if (mp && mp.online) state="online"; else startMatch(); }
+      else if (k === "Escape" || k === "Backspace") { if (mp && mp.online) leaveOnline(); else { state="menu"; mp=null; } }
+      return;
+    }
+    if (state === "online") {
+      if (k === "Escape" || k === "Backspace") { if (online && online.joinMode && !online.code){ online.joinMode=false; hideCodeInput(); } else leaveOnline(); }
+      return;
+    }
+    if (state === "dead") {
+      if (k === "r" || k === "R") startPlay();
+      else if (k === "Enter" || k === "Escape" || k === " ") state = "menu";
+      return;
+    }
+    if (state === "skins") {
+      if (k === "ArrowUp" || k === "ArrowDown") { skinsTab = skinsTab==="chars"?"floors":"chars"; AUD.tick(); }
+      else if (skinsTab==="chars") {
+        if (k === "ArrowLeft")  { skinIndex = (skinIndex - 1 + SKINS.length) % SKINS.length; AUD.tick(); }
+        if (k === "ArrowRight") { skinIndex = (skinIndex + 1) % SKINS.length; AUD.tick(); }
+        if (k === "Enter" || k === " ") chooseSkin();
+      } else {  // floors tab: ◄ ► cycle through discovered floor types
+        if (k === "ArrowLeft" || k === "ArrowRight"){ const ds=[...discovered].sort((a,b)=>a-b); let i=ds.indexOf(startTheme); if(i<0)i=0; pickFloorType(ds[(i+(k==="ArrowRight"?1:-1)+ds.length)%ds.length]); }
+      }
+      if (k === "Escape" || k === "Backspace") state = "menu";
+      return;
+    }
+    if (state === "friends") {
+      if (k === "Enter" || k === " ") { if (!profile) signIn(); }
+      if (k === "Escape" || k === "Backspace") state = "menu";
+      return;
+    }
+    if (state === "about") {
+      if (k==="Escape"||k==="Backspace"||k==="Enter"||k===" ") state = "menu";
+      return;
+    }
+    // ----- menu -----
+    if (state === "menu") {
+      const items = menuItems();
+      if (k === "ArrowUp")   { menuIndex = (menuIndex - 1 + items.length) % items.length; AUD.tick(); }
+      if (k === "ArrowDown") { menuIndex = (menuIndex + 1) % items.length; AUD.tick(); }
+      if (k === "ArrowLeft")  cycleTrack(-1);
+      if (k === "ArrowRight") cycleTrack(1);
+      if (k === "Enter" || k === " " || k === "Spacebar") { AUD.select(); activate(items[menuIndex].id); }
+    }
+  });
+  addEventListener("keyup", e => {
+    const k = e.key;
+    if (k === "ArrowLeft") keys.left = false;
+    if (k === "ArrowRight") keys.right = false;
+    if (k === "ArrowUp" || k === " " || k === "Spacebar") keys.jump = false;
+    if (k === "Shift") keys.run = false;
+  });
+
+  // ===== Touch / pointer (Android-friendly) ==================================
+  let hotspots = [];
+  function hot(x,y,w,h,fn){ hotspots.push({x,y,w,h,fn}); }
+  function hitTest(px,py){ for (let i=hotspots.length-1;i>=0;i--){ const h=hotspots[i];
+    if (px>=h.x&&px<=h.x+h.w&&py>=h.y&&py<=h.y+h.h){ h.fn(); return true; } } return false; }
+  function canvasXY(e){ const r=canvas.getBoundingClientRect();
+    return { x:(e.clientX-r.left)*(W/r.width), y:(e.clientY-r.top)*(H/r.height) }; }
+  // steering (-1..1) from a touch's x. auto = analog drag (distance dragged); button/swipe = which
+  // side of centre you're holding (left half → left, right half → right; slide across to switch).
+  function computeSteer(x){
+    if (controlMode === "bsteer"){                      // button+steer: steer by which side of centre you hold
+      const d = x - W/2;
+      return Math.abs(d) < 18 ? 0 : (d < 0 ? -1 : 1);
+    }
+    const dx = x - touch.startX, dz = 10;               // auto / swipe / button+drag: analog drag (distance = speed)
+    return Math.abs(dx) < dz ? 0 : Math.max(-1, Math.min(1, (dx - Math.sign(dx)*dz)/110));
+  }
+
+  canvas.addEventListener("pointerdown", e => {
+    ensureAudio(); e.preventDefault();
+    const {x,y} = canvasXY(e);
+    if (state === "play" || state === "mp") {
+      if (y < 44 && x > W-52)              { abortToMenu(); return; }    // pause
+      if (y < 44 && x > W-104 && x < W-56) { toggleMute(); return; }     // mute
+      if (isButton() && Math.hypot(x-JUMP_BX, y-JUMP_BY) < JUMP_BR+8){ requestJump(); return; }  // JUMP button
+      if (!touch.active){                                                // first finger down = the steering finger
+        touch.active = true; touch.id = e.pointerId; touch.startX = x; touch.startY = y; touch.refY = y;
+        touch.moveX = computeSteer(x);                                   // button/swipe steer the instant you press
+        try { canvas.setPointerCapture(e.pointerId); } catch(_){}
+      }
+    } else if (state === "replay") { state = "menu"; }
+    else hitTest(x,y);
+  }, { passive:false });
+  canvas.addEventListener("pointermove", e => {
+    if (!touch.active || e.pointerId!==touch.id) return; e.preventDefault();
+    const {x,y} = canvasXY(e);
+    touch.moveX = computeSteer(x);
+    if (controlMode==="swipe"){                        // flick UP to jump
+      if (y > touch.refY) touch.refY = y;              // reference follows the finger downward
+      else if (touch.refY - y > 34){ requestJump(); touch.refY = y; }   // a sharp upward flick -> jump
+    }
+  }, { passive:false });
+  function endTouch(e){ if (e && e.pointerId!==touch.id) return; touch.active = false; touch.id = -1; touch.moveX = 0; }
+  canvas.addEventListener("pointerup", endTouch);
+  canvas.addEventListener("pointercancel", endTouch);
+  function requestJump(){ jumpBuf = JUMP_BUF; }        // queue a jump (consumed when grounded / within coyote grace)
+  function cycleControl(dir){ const o=CONTROL_SCHEMES; controlMode=o[(o.indexOf(controlMode)+dir+o.length)%o.length]; LS.set("jjdx_control",controlMode); updateHint(); if(actx)AUD.tick(); }
+  function controlLabel(){ return controlMode==="desktop"?"Desktop":controlMode==="auto"?"Auto":controlMode==="bdrag"?"Button + drag":controlMode==="bsteer"?"Button + steer":"Swipe up"; }
+  function updateHint(){ hintEl.textContent =
+        controlMode==="desktop" ? "←  →  move  ·  Space / ↑  jump  ·  Shift = walk  ·  M music"
+      : controlMode==="bsteer"  ? "hold left / right side to move  ·  tap JUMP to leap  ·  M music"
+      : controlMode==="bdrag"   ? "drag to steer  ·  tap JUMP to leap  ·  M music"
+      : controlMode==="swipe"   ? "drag to steer  ·  flick UP to jump  ·  M music"
+      : isTouch                 ? "drag left & right to steer  ·  auto-jumps  ·  M music"
+      :                           "←  →  steer  ·  auto-jumps  ·  M music"; }
+
+  function activate(id){
+    if (id === "play") startPlay();
+    else if (id === "mp") { state = "lobby"; }
+    else if (id === "online") { online = null; netConnect(); state = "online"; }
+    else if (id === "skins") { skinIndex = selectedSkin; state = "skins"; }
+    else if (id === "friends") { state = "friends"; if (profile) pushToast("🔔","Marc just beat your best score — go again?"); }
+    else if (id === "replay") startReplay();
+    else if (id === "about") state = "about";
+  }
+  function chooseSkin(){
+    const s = SKINS[skinIndex];
+    if (unlocked.has(skinIndex)) {
+      selectedSkin = skinIndex; LS.set("jjdx_skin", selectedSkin);
+      flash(s.name + " equipped"); AUD.select();
+    } else {
+      // prototype purchase — no real charge
+      unlocked.add(skinIndex); saveUnlocked();
+      selectedSkin = skinIndex; LS.set("jjdx_skin", selectedSkin);
+      flash("Unlocked " + s.name + "!  (prototype $2)"); AUD.coin();
+    }
+  }
+  function signIn(){ profile = { name:"You" }; LS.set("jjdx_profile", profile); loadFriends(); flash("Signed in (prototype)"); AUD.select(); }
+  function flash(t){ flashMsg = t; flashT = 1.4; }
+
+  // floor-type (theme) selection — pick a DISCOVERED floor type to start in (from the Skins page)
+  function pickFloorType(idx){ if (!discovered.has(idx)) return; startTheme = idx; LS.set("jjdx_starttheme", idx); AUD.select(); }
+  // notification toast — local prototype of the app's push notifications
+  let toastIcon="", toastText="", toastT=0;
+  function pushToast(icon,text){ toastIcon=icon; toastText=text; toastT=4.5; }
+  function drawToast(){
+    if (toastT<=0) return; toastT-=0.016;
+    const appear=Math.min(1,(4.5-toastT)*3), a=Math.min(1,toastT,appear), yo=(1-appear)*-54;
+    ctx.globalAlpha=a; ctx.fillStyle="rgba(18,28,50,0.96)"; roundRect(20,14+yo,W-40,46,10); ctx.fill();
+    ctx.strokeStyle="rgba(120,170,255,0.5)"; ctx.lineWidth=1; roundRect(20,14+yo,W-40,46,10); ctx.stroke();
+    ctx.textAlign="left"; ctx.font="22px Trebuchet MS"; ctx.fillStyle="#ffd34d"; ctx.fillText(toastIcon,34,46+yo);
+    ctx.font="bold 13px Trebuchet MS"; ctx.fillStyle="#eaf2ff"; ctx.fillText("Jump Jump DX",66,33+yo);
+    ctx.font="13px Trebuchet MS"; ctx.fillStyle="#bcd6f7"; ctx.fillText(toastText,66,51+yo);
+    ctx.globalAlpha=1; ctx.textAlign="center";
+  }
+
+  // ===== Game state ==========================================================
+  let platforms, player, cam, scrollSpeed, score, combo, comboTimer, startFloor,
+      bestCombo, highFloor, particles, shakeT, bigMsg, bigMsgT, recording, replay,
+      runFrames, speedLevel, prevSpeedLevel, curBand, mp, checkpointScore;
+  const THEMES = [                              // 30 floor types — art changes every 100 floors
+    { wall:["#2a4a78","#16263f"], plat:["#cfeaff","#7fb4e6"], bg:[222,15], name:"Ice" },
+    { wall:["#5a5a66","#2c2c34"], plat:["#dadae2","#9a9aa6"], bg:[230,11], name:"Stone" },
+    { wall:["#7a2f2a","#36140f"], plat:["#ffcaa0","#e0673a"], bg:[10,16],  name:"Lava" },
+    { wall:["#2f6a3a","#15351d"], plat:["#cdeeb0","#74b35a"], bg:[120,14], name:"Forest" },
+    { wall:["#6a3a78","#321a40"], plat:["#ffd0e6","#d87ab8"], bg:[296,16], name:"Twilight" },
+    { wall:["#2a2f55","#101226"], plat:["#cfd6ff","#8a93d8"], bg:[245,13], name:"Night" },
+    { wall:["#9c7a3e","#4a3415"], plat:["#ffe6a8","#d9b066"], bg:[40,16],  name:"Desert" },
+    { wall:["#1f6a7a","#0c2e36"], plat:["#aef0ff","#5fc4d8"], bg:[190,14], name:"Ocean" },
+    { wall:["#a3504a","#3a1c2a"], plat:["#ffd0a0","#ff8a6b"], bg:[18,16],  name:"Sunset" },
+    { wall:["#c86a9e","#5a2a44"], plat:["#ffd6ef","#ff9ed1"], bg:[320,18], name:"Candy" },
+    { wall:["#5a7a2a","#243414"], plat:["#d4ff8a","#9ad44a"], bg:[80,14],  name:"Toxic" },
+    { wall:["#4a3e36","#221c16"], plat:["#b8a896","#7a6a58"], bg:[30,9],   name:"Cave" },
+    { wall:["#6a90c8","#3a5a8a"], plat:["#ffffff","#cfe2ff"], bg:[210,20], name:"Sky" },
+    { wall:["#9c5a2e","#3a1c10"], plat:["#ffcf8a","#e08a4a"], bg:[28,15],  name:"Autumn" },
+    { wall:["#c8607e","#5a2434"], plat:["#ffdce6","#ff9ab0"], bg:[340,17], name:"Cherry" },
+    { wall:["#1f7a55","#0c3424"], plat:["#9affcf","#3fd49a"], bg:[155,14], name:"Emerald" },
+    { wall:["#8a2440","#3a0c1a"], plat:["#ffb0c4","#e05a7a"], bg:[342,15], name:"Ruby" },
+    { wall:["#9c8030","#3a3010"], plat:["#ffe680","#e0b840"], bg:[48,15],  name:"Goldmine" },
+    { wall:["#46505a","#1c242c"], plat:["#c0ccd8","#7a8896"], bg:[205,11], name:"Storm" },
+    { wall:["#c86a5a","#5a2820"], plat:["#ffd0c0","#ff9a80"], bg:[12,17],  name:"Coral" },
+    { wall:["#3fae8a","#185a44"], plat:["#cfffe6","#7fe0bf"], bg:[160,16], name:"Mint" },
+    { wall:["#5a1a14","#1a0805"], plat:["#ff8a4a","#d44020"], bg:[8,13],   name:"Volcano" },
+    { wall:["#7fb0d8","#3a6a96"], plat:["#ffffff","#bfe6ff"], bg:[200,20], name:"Glacier" },
+    { wall:["#2a8a3a","#0c3414"], plat:["#aaff8a","#5fd44a"], bg:[110,15], name:"Jungle" },
+    { wall:["#2a2a5a","#0c0c24"], plat:["#5ffbe0","#c81ff0"], bg:[270,13], name:"Neon", glow:"#5ffbe0" },
+    { wall:["#d08aa8","#6a3a50"], plat:["#ffe0ec","#ffb0cc"], bg:[330,19], name:"Sakura" },
+    { wall:["#2a5a6a","#102a34"], plat:["#8affc0","#7fa0ff"], bg:[180,15], name:"Aurora", glow:"#8affc0" },
+    { wall:["#6a4ac8","#2a1a5a"], plat:["#d8c0ff","#a07aff"], bg:[260,16], name:"Crystal", glow:"#b89aff" },
+    { wall:["#3a2a7a","#100a2a"], plat:["#b0a0ff","#7a5fff"], bg:[255,13], name:"Galaxy", glow:"#7a5fff" },
+    { wall:["#ffe9b0","#c89aff"], plat:["#ffffff","#ffe9b0"], bg:[280,22], name:"Celestial", glow:"#fff3c0", rainbow:true },
+  ];
+  let discovered = new Set(LS.get("jjdx_floors", [0]));   // floor types (theme indices) you've reached
+  discovered.add(0);                                       // Ice is always discovered
+  let startTheme = LS.get("jjdx_starttheme", 0);          // chosen starting floor type
+  if (!discovered.has(startTheme)) startTheme = 0;
+  let runTheme = 0;                                        // theme offset for the current run (set in reset)
+
+  // ----- multiplayer (prototype: local AI "shadow" friends climbing the same seeded tower) -----
+  let mpMode   = LS.get("jjdx_mpmode", "race");           // "race" = first to floor X · "time" = best score in 5:00
+  let mpTarget = LS.get("jjdx_mptarget", 100);            // race target floor
+  const GHOST_COLORS = ["#ff7a7a","#5fb4ff","#7fe0a0","#ffd34d"];
+  let mpInvited = new Set([0,1,2,3]);                     // which friends are invited (→ become your shadows). In the app these are real Play Games / Game Center friends.
+
+  function randomSeed(){ return (Math.floor(Math.random()*0x7fffffff) ^ Date.now()) >>> 0; }
+
+  function themeIndex(floor){ return (runTheme + Math.floor(floor/100)) % THEMES.length; }
+  // deterministic per-floor pseudo-random (independent of generation order) so a friend's
+  // shadow / the minimap can resolve ANY floor's platform — not just the on-screen window.
+  function hashf(x){ x|=0; x=Math.imul(x^(x>>>16),0x45d9f3b); x=Math.imul(x^(x>>>16),0x45d9f3b); x^=x>>>16; return (x>>>0)/4294967296; }
+  function floorRand(floor,k){ return hashf((runSeed ^ Math.imul(floor+1,0x9E3779B1) ^ Math.imul(k+1,0x85EBCA77))>>>0); }
+  function makePlatform(floor) {
+    const y = (H - 80) - floor * FLOOR_H;                 // startFloor is always 0
+    const th = themeIndex(floor);
+    // floor 0 and every 100th are full-width "milestone" floors (the floor type changes here)
+    if (floor === 0 || floor % 100 === 0)
+      return { floor, x: PLAY_L, w: PLAY_R - PLAY_L, y, theme: th, milestone: floor>0 && floor%100===0 };
+    const minW = 70, maxW = 160;
+    const shrink = Math.min(maxW - minW, Math.max(0, floor - 40) * 0.30);   // gentle: first ~100 stay wide
+    const w = Math.max(minW, Math.min(maxW, maxW - shrink + floorRand(floor,0) * 40));
+    const x = PLAY_L + floorRand(floor,1) * ((PLAY_R - PLAY_L) - w);
+    return { floor, x, w, y, theme: th, milestone: false };
+  }
+
+  function reset(seed, theme) {
+    startFloor = 0; runTheme = theme || 0;
+    runSeed = seed; rng = mulberry32(seed);
+    platforms = [];
+    for (let f = 0; f <= 14; f++) platforms.push(makePlatform(f));
+    const g = platforms[0];
+    player = { x: g.x + g.w/2 - PLAYER_W/2, y: g.y - PLAYER_H, vx:0, vy:0,
+               onGround:true, floor:0, face:1, squash:0, skid:false, lastTakeoffFloor:0, coyote:0 };
+    cam = player.y - H*0.55; scrollSpeed = 0; score = 0; runFrames = 0; speedLevel = 0; prevSpeedLevel = 0;
+    combo = 0; comboTimer = 0; bestCombo = 0; highFloor = 0; curBand = 0; checkpointScore = 0;
+    particles = []; shakeT = 0; bigMsg = ""; bigMsgT = 0; started = false; tut = 1;
+  }
+  function startPlay(){ reset(randomSeed(), startTheme); recording = []; replay = null; state = "play"; jumpBuf = 0; updateHint(); }
+  function startReplay(){ if (!bestRun) return; reset(bestRun.seed, bestRun.theme||0); replay = { inputs: bestRun.inputs, frame:0 }; state = "replay"; }
+
+  // ----- multiplayer match lifecycle -----
+  function makeActorAtStart(offset){
+    const g = makePlatform(0);
+    return { x:g.x+g.w/2-PLAYER_W/2+(offset||0), y:g.y-PLAYER_H, vx:0, vy:0,
+             onGround:true, floor:0, face:1, squash:0, skid:false, lastTakeoffFloor:0, coyote:0,
+             justTookOff:false, justLanded:-1, wallContact:0, wallLoud:false, _wasGround:true };
+  }
+  function ghostMoveX(g){                                   // simple climbing AI for a friend shadow
+    const a=g.a;
+    const aheadN = a.onGround ? (1 + Math.round(g.skill*2)) : 1;   // skilled friends aim higher (longer combos)
+    const p = makePlatform(a.floor + aheadN);
+    let m = ((p.x + p.w/2) - (a.x + PLAYER_W/2)) / 90;             // steer toward the target platform
+    m += Math.sin((T + g.tSeed) * 0.07) * (1 - g.skill) * 0.25;   // weaker friends wobble
+    const cap = 0.55 + g.skill*0.45;
+    return Math.max(-cap, Math.min(cap, m));
+  }
+  function startMatch(){
+    reset(randomSeed(), startTheme); recording=[]; replay=null;
+    const fr = loadFriends().slice(0,4).map((f,i)=>({f,i})).filter(x=>mpInvited.has(x.i));  // only the friends you invited
+    mp = { mode:mpMode, target:mpTarget, timeLimit:5*60*60, frame:0, over:false, youDeaths:0, ghosts:[] };
+    mp.ghosts = fr.map((x,j)=>({
+      name:x.f.name, color:GHOST_COLORS[x.i%GHOST_COLORS.length],         // colour matches the lobby (keyed by original index)
+      a: makeActorAtStart((j-(fr.length-1)/2)*26),
+      skill: Math.min(0.97, 0.40 + j*0.13 + Math.random()*0.22),  // a spread of paces to race against
+      highFloor:0, score:0, combo:0, comboTimer:0, finishFrame:-1, tSeed:Math.random()*1000
+    }));
+    state="mp"; jumpBuf=0; started=true; updateHint();   // multiplayer starts immediately (no floor-0 wait — friends are racing)
+  }
+  function endMatch(reason){
+    if (!mp || mp.over) return;
+    mp.over=true; mp.reason=reason;
+    const yourScore=Math.floor(score);   // reflects score-rush checkpoint rollbacks
+    const you={ you:true, name: profile?profile.name:"You", floor:highFloor, score:yourScore,
+                finish:(mp.mode==="race" && highFloor>=mp.target)?mp.frame:Infinity };
+    const rows=[you, ...mp.ghosts.map(g=>({ you:false, name:g.name, color:g.color,
+                floor:g.highFloor, score:Math.floor(g.score),
+                finish:(mp.mode==="race" && g.finishFrame>=0)?g.finishFrame:Infinity }))];
+    if (mp.mode==="race") rows.sort((x,y2)=> (x.finish-y2.finish) || (y2.floor-x.floor));
+    else                  rows.sort((x,y2)=> y2.score-x.score);
+    rows.forEach((r,i)=> r.place=i+1);
+    mp.results=rows; mp.youPlace=rows.find(r=>r.you).place;
+    if (mp.youPlace===1) AUD.fanfare(); else AUD.gameOver();
+    state="mpend";
+  }
+  function respawnPlayer(){                                 // multiplayer: a fall sends you back to the last full "milestone" floor (0,100,200,…)
+    if (mp) mp.youDeaths = (mp.youDeaths||0) + 1;
+    const f = Math.floor(highFloor/100)*100;               // checkpoint = the milestone floor at the bottom of your current hundred
+    const p = makePlatform(f);
+    player.x = p.x + p.w/2 - PLAYER_W/2; player.y = p.y - PLAYER_H;
+    player.vx=0; player.vy=0; player.onGround=true; player.floor=f; player.lastTakeoffFloor=f;
+    cam = player.y - H*0.45;                                // re-frame the camera onto the checkpoint (it had risen far past you)
+    platforms = []; for (let i=Math.max(0,f-2); i<=f+16; i++) platforms.push(makePlatform(i));   // rebuild the visible window here
+    if (combo>bestCombo) bestCombo=combo; combo=0; comboTimer=0;   // combo/momentum reset; high-floor record kept
+    let lost=0;
+    if (mp && mp.mode==="time"){ lost=Math.floor(score-checkpointScore); score=checkpointScore; }  // score rush: forfeit points earned since this checkpoint
+    spawnParticles(player.x+PLAYER_W/2, player.y+PLAYER_H/2, 18, "#bfe3ff", 5);
+    spawnParticles(player.x+PLAYER_W/2, player.y+PLAYER_H/2, 12, "#9fd0ff", 4);
+    shakeT=Math.max(shakeT,0.4);
+    flashBig(lost>0 ? ("CHECKPOINT "+f+"  −"+lost+" pts") : (f===0 ? "RESPAWN — FLOOR 0" : "CHECKPOINT — FLOOR "+f));
+    AUD.land();
+  }
+  function abortToMenu(){ if (state==="mp" && mp && mp.online){ leaveOnline(); return; } if (state==="mp") mp=null; state="menu"; }
+
+  function topFloor(){ return platforms[platforms.length-1].floor; }
+  function ensurePlatforms(){
+    while ((H - 80) - (topFloor()-startFloor) * FLOOR_H > cam - FLOOR_H*4) platforms.push(makePlatform(topFloor()+1));
+    const cutoff = cam + H + FLOOR_H*2;
+    platforms = platforms.filter(p => p.y < cutoff);
+  }
+  function spawnParticles(x,y,n,color,spd){
+    if (particles.length > 180) return;                 // cap for mobile perf (avoid runaway bursts)
+    for (let i=0;i<n;i++){ const a=Math.random()*Math.PI*2, s=Math.random()*spd;
+      particles.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s-1,life:1,color}); }
+  }
+  function flashBig(t){ bigMsg=t; bigMsgT=1; }
+
+  // ===== Shared actor physics (the player AND every friend "shadow" run this) =
+  // Pure on `a` + the deterministic tower (makePlatform). Effects — sound, particles,
+  // scoring — are applied by the caller from the markers stepActor leaves on `a`.
+  function stepActor(a, moveX, jump){
+    a.justTookOff=false; a.justLanded=-1; a.wallContact=0; a.wallLoud=false;
+    const grounded0 = a.onGround;                         // coyote-time: were we on the floor at the start of this step?
+    const dir = moveX > 0.02 ? 1 : (moveX < -0.02 ? -1 : 0);
+    const targetV = moveX * RUN_MAX;
+    a.skid = false;
+    let rate;
+    if (a.onGround){
+      if (dir!==0){ a.face=dir;
+        if (a.vx!==0 && Math.sign(a.vx)!==dir){ rate=SKID_DECEL; a.skid=Math.abs(a.vx)>1.8*PACE; }
+        else rate=GROUND_ACCEL;
+      } else rate=RELEASE_DECEL;
+    } else {
+      // air: mostly momentum-preserving, but allow a LITTLE steering even at high speed so you can
+      // nudge your trajectory mid-flight (gentle, so the wall-to-wall ride still mostly holds)
+      if (dir!==0){ a.face=dir;
+        const opposing = a.vx!==0 && Math.sign(a.vx)!==dir;
+        rate = (opposing && Math.abs(a.vx)>RUN_MAX*0.8) ? AIR_ACCEL*0.35 : AIR_ACCEL;
+      } else rate=0;
+    }
+    if (a.vx<targetV) a.vx=Math.min(targetV,a.vx+rate);
+    else if (a.vx>targetV) a.vx=Math.max(targetV,a.vx-rate);
+
+    if (jump && (a.onGround || a.coyote>0)){               // jump if grounded OR within the coyote-time grace after leaving
+      a.vy = -(BASE_JUMP + Math.abs(a.vx)*SPEED_JUMP);
+      a.onGround=false; a.coyote=0; a.squash=1; a.lastTakeoffFloor=a.floor; a.justTookOff=true;
+    }
+    a._wasGround = a.onGround;
+    a.vy += GRAVITY; a.x += a.vx; a.y += a.vy;
+
+    if (a.x < PLAY_L){ const sp=Math.abs(a.vx); a.wallLoud=sp>1.5*PACE; a.wallContact=-1; a.x=PLAY_L; a.vx=sp*0.95; a.face=1;
+      if (a.vy>0 && sp>1.5*PACE) a.vy = -Math.min(sp*WALL_LIFT, WALL_LIFT_MAX); }   // bounce while FALLING → upward lift (more time to steer)
+    if (a.x+PLAYER_W > PLAY_R){ const sp=Math.abs(a.vx); a.wallLoud=sp>1.5*PACE; a.wallContact=1; a.x=PLAY_R-PLAYER_W; a.vx=-sp*0.95; a.face=-1;
+      if (a.vy>0 && sp>1.5*PACE) a.vy = -Math.min(sp*WALL_LIFT, WALL_LIFT_MAX); }
+
+    a.onGround=false;
+    if (a.vy>=0){
+      const feet=a.y+PLAYER_H, base=Math.floor(((H-80)-feet)/FLOOR_H);
+      for (let f=base+2; f>=base-2; f--){                  // land on the highest platform crossed this frame
+        if (f<0) continue;
+        const p=makePlatform(f);
+        if (a.x+PLAYER_W>p.x+3 && a.x<p.x+p.w-3 &&
+            feet>=p.y && feet<=p.y+PLAT_H+a.vy && (feet-a.vy)<=p.y+1){
+          a.y=p.y-PLAYER_H; a.vy=0; a.onGround=true; a.squash=-1;
+          if (p.floor>a.floor) a.justLanded=p.floor;
+          a.floor=Math.max(a.floor,p.floor);
+          break;
+        }
+      }
+    }
+    if (a.onGround) a.coyote = 0;                          // grounded → reset coyote grace
+    else if (grounded0 && !a.justTookOff) a.coyote = COYOTE;   // just walked/scrolled off an edge → start the grace
+    else if (a.coyote > 0) a.coyote--;                    // tick the grace down while airborne
+  }
+
+  // ===== Update ==============================================================
+  function update(){
+    if (state !== "play" && state !== "replay" && state !== "mp") return;
+
+    // ---- steering (moveX in -1..1) + jump request ----
+    let moveX, wantJump;
+    if (state === "replay") {
+      const v = replay.inputs[replay.frame] || 0;     // jump encoded as +1000 on the recorded moveX
+      wantJump = v >= 500; moveX = (wantJump ? v-1000 : v) / 100;
+    } else {
+      if (touch.active) moveX = touch.moveX;            // drag (analog)
+      else { const d=(keys.right?1:0)-(keys.left?1:0); moveX = d*(keys.run?0.55:1); }   // keyboard: full speed like mobile (Shift = precise walk)
+      // auto bounces every landing — but the run waits at floor 0 until you engage (touch/steer/key);
+      // manual modes jump on request (button tap / up-flick / space)
+      const engaged = started || touch.active || keys.left || keys.right || keys.run;
+      wantJump = (controlMode==="auto") ? engaged : (jumpBuf>0);
+    }
+    if (state === "play") recording.push(Math.round(moveX*100) + (wantJump?1000:0));
+
+    // ---- physics: one shared step (the friend shadows in multiplayer run the same one) ----
+    const prevFloor = player.floor;
+    stepActor(player, moveX, wantJump);
+    if (player.justTookOff) jumpBuf = 0;               // consume the buffered jump
+    else if (jumpBuf > 0) jumpBuf--;
+    if (player.justTookOff) started = true;            // first jump launches the run (camera + clock + fades the tutorial)
+    if (player.justTookOff){ spawnParticles(player.x+PLAYER_W/2, player.y+PLAYER_H, 8, "#bfe3ff", 4); AUD.jump(); }
+    if (player.skid && Math.random() < 0.5)
+      spawnParticles(player.x + (player.face>0?0:PLAYER_W), player.y+PLAYER_H, 1, "#dfeefc", 2);
+    if (player.wallContact){
+      spawnParticles(player.wallContact<0?PLAY_L:PLAY_R, player.y+PLAYER_H/2, 5, "#9fd0ff", 3);
+      if (player.wallLoud) AUD.bounce();
+    }
+    if (player.justLanded >= 0){
+      const lf = player.justLanded, gained = lf - player.lastTakeoffFloor;
+      if (gained >= 2){
+        combo += gained; comboTimer = 1; score += gained*gained*10;
+        if (gained >= 5) flashBig("AWESOME! +"+gained); else if (gained >= 3) flashBig("COOL! +"+gained);
+        spawnParticles(player.x+PLAYER_W/2, player.y+PLAYER_H, 14, "#ffd34d", 5);
+        shakeT = Math.min(0.5, gained*0.06);
+        AUD.combo(gained); if (gained >= 5) AUD.fanfare();
+      } else if (combo > 0){ if (combo>bestCombo) bestCombo=combo; combo=0; comboTimer=0; }
+      score += (lf - prevFloor) * 10;
+    }
+    if (player.floor > highFloor) highFloor = player.floor;
+
+    if (comboTimer > 0) { comboTimer -= 0.006; if (comboTimer <= 0){ if(combo>bestCombo)bestCombo=combo; combo=0; comboTimer=0; } }
+
+    if (started){                                         // clock + relentless rise begin only after the first jump
+      runFrames++;                                        // frame-based run clock (deterministic for replays)
+      speedLevel = Math.floor(runFrames / 3600);          // camera speeds up every 60s (3600 frames @ 60fps)
+      if (speedLevel > prevSpeedLevel){                   // crossed a 60s boundary -> speed up
+        prevSpeedLevel = speedLevel; flashBig("⏱ SPEEDING UP!"); AUD.alert(); shakeT = Math.max(shakeT, 0.35);
+      }
+      scrollSpeed = Math.min(3.4, 0.6 + speedLevel * 0.42) * PACE; // stepwise, like the original (×PACE)
+    }
+    const desiredCam = player.y - H*0.45;
+    if (desiredCam < cam) cam = desiredCam;               // keep player framed (never scroll down)
+    cam -= scrollSpeed;                                   // relentless rise (scrollSpeed stays 0 until started)
+    ensurePlatforms();
+    if (started && tut > 0) tut -= 0.06;                  // fade the tutorial once you've launched
+
+    // particles
+    for (const pt of particles){ pt.x+=pt.vx; pt.y+=pt.vy; pt.vy+=0.15; pt.life-=0.02; }
+    particles = particles.filter(p=>p.life>0);
+    player.squash *= 0.8;
+    if (shakeT>0) shakeT-=0.03;
+    if (bigMsgT>0) bigMsgT-=0.02;
+    const band = Math.floor(highFloor/100);               // reached a new floor-type band?
+    if (band > curBand){
+      curBand = band; checkpointScore = score;            // snapshot score at this milestone (score-rush falls roll back to here)
+      const th = themeIndex(highFloor);
+      flashBig(THEMES[th].name.toUpperCase()+" FLOORS!"); AUD.newfloor(); shakeT = Math.max(shakeT,0.3);
+      spawnParticles(player.x+PLAYER_W/2, player.y+PLAYER_H/2, 26, THEMES[th].plat[0], 6);
+      spawnParticles(player.x+PLAYER_W/2, player.y,          18, "#ffffff",         5);
+      if (state==="play" && !discovered.has(th)){          // first time ever -> unlock as a start type
+        discovered.add(th); LS.set("jjdx_floors",[...discovered]);
+        pushToast("✦","New floor type discovered: "+THEMES[th].name+"!  Start here from Skins.");
+      }
+    }
+
+    // ---- multiplayer: advance the friend shadows + resolve the match ----
+    if (state==="mp" && mp && !mp.over){
+      if (mp.online){                                     // ONLINE: peers are network-driven; I broadcast my own state
+        const now=performance.now();
+        for (const g of mp.ghosts) interpPeer(g, now);    // smooth interpolation, ~100ms behind
+        if (mp.frame % 2 === 0) netSend({t:"state", x:Math.round(player.x), y:Math.round(player.y), floor:player.floor, face:player.face, score:Math.floor(score), alive:true});   // 30 Hz
+        mp.frame++;
+        if (!mp.sentFinish && ((mp.mode==="race" && highFloor>=mp.target) || (mp.mode==="time" && mp.frame>=mp.timeLimit))){
+          mp.sentFinish=true; netSend({t:"finish", floor:highFloor, score:Math.floor(score), frame:mp.frame});   // server arbitrates winner / collects scores
+        }
+      } else {                                            // LOCAL: AI friend shadows
+        for (const g of mp.ghosts){
+          stepActor(g.a, ghostMoveX(g), true);   // friend shadows always auto-jump (AI)
+          if (g.a.floor>g.highFloor) g.highFloor=g.a.floor;
+          if (g.a.justLanded>=0){
+            const gd=g.a.justLanded - g.a.lastTakeoffFloor;
+            if (gd>=2){ g.combo+=gd; g.comboTimer=1; g.score+=gd*gd*10; }
+            else if (g.combo>0) g.combo=0;
+          }
+          if (g.comboTimer>0){ g.comboTimer-=0.006; if (g.comboTimer<=0) g.combo=0; }
+          g.score=Math.max(g.score, g.highFloor*10);
+          if (mp.mode==="race" && g.highFloor>=mp.target && g.finishFrame<0) g.finishFrame=mp.frame;
+        }
+        mp.frame++;
+        if (mp.mode==="race"){
+          if (highFloor>=mp.target) endMatch("win");
+          else if (mp.ghosts.some(g=>g.finishFrame>=0)) endMatch("lose");
+        } else if (mp.frame>=mp.timeLimit) endMatch("time");
+      }
+    }
+
+    // death / end
+    if ((state==="play" || state==="mp" || state==="replay") && player.y - cam > H + 20) {
+      if (state === "replay") state = "menu";
+      else if (state === "mp") respawnPlayer();             // multiplayer: respawn & keep going (match ends on target/timer only)
+      else die();
+    } else if (state === "replay") {
+      replay.frame++;
+      if (replay.frame >= replay.inputs.length) state = "menu";
+    }
+  }
+
+  function die(){
+    state = "dead";
+    AUD.gameOver();
+    if (combo > bestCombo) bestCombo = combo;
+    if (score > best) {
+      best = Math.floor(score); LS.set("jjdx_best", best);
+      bestRun = { seed: runSeed, inputs: recording, score: best, skin: selectedSkin, phys: PHYS_VERSION, theme: runTheme };
+      LS.set("jjdx_bestrun", bestRun);
+    }
+    spawnParticles(player.x+PLAYER_W/2, player.y+PLAYER_H/2, 24, "#ff6b6b", 6);
+    shakeT = 0.5;
+  }
+
+  // ===== Rendering ===========================================================
+  let T = 0;  // global animation clock (frames)
+
+  function roundRect(x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y);
+    ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r);
+    ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+
+  function skinColors(skin){
+    let body=skin.body, accent=skin.accent;
+    if (skin.hue){ const h=(T*1.6)%360; body=`hsl(${h},85%,62%)`; accent=`hsl(${h},75%,45%)`; }
+    return { body, accent };
+  }
+
+  // Generic character renderer (player, ghosts, menu, store)
+  function drawCharacter(x,y,w,h,skin,face,opts){
+    opts = opts || {};
+    const a = opts.alpha==null ? 1 : opts.alpha;
+    const sc = w/PLAYER_W;
+    const { body, accent } = skinColors(skin);
+    ctx.save(); ctx.globalAlpha = a;
+    if (skin.glow){
+      const g = ctx.createRadialGradient(x+w/2,y+h/2,2,x+w/2,y+h/2,w*1.1);
+      g.addColorStop(0, skin.glow); g.addColorStop(1, "rgba(0,0,0,0)");
+      ctx.globalAlpha = a*(0.45+0.15*Math.sin(T*0.08)); ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(x+w/2,y+h/2,w*1.1,0,7); ctx.fill(); ctx.globalAlpha = a;
+    }
+    if (skin.grad){ const g=ctx.createLinearGradient(0,y,0,y+h); g.addColorStop(0,body); g.addColorStop(1,skin.grad); ctx.fillStyle=g; }
+    else ctx.fillStyle = body;
+    roundRect(x,y,w,h,7*sc); ctx.fill();
+    ctx.fillStyle = accent; roundRect(x,y+h*0.55,w,h*0.45,7*sc); ctx.fill();
+    if (skin.band){ ctx.fillStyle=skin.band; roundRect(x,y+h*0.13,w,5*sc,2*sc); ctx.fill(); }
+    ctx.fillStyle = skin.eye;
+    const ew=4*sc, eh=5*sc;
+    if (opts.forward){ ctx.fillRect(x+w*0.28,y+h*0.25,ew,eh); ctx.fillRect(x+w*0.6,y+h*0.25,ew,eh); }
+    else { const ex = face>0 ? x+w*0.55 : x+w*0.2; ctx.fillRect(ex,y+h*0.25,ew,eh); ctx.fillRect(ex+(face>0?7:-7)*sc,y+h*0.25,ew,eh); }
+    if (skin.sparkle){ for (let i=0;i<3;i++){ const ang=T*0.05+i*2.1;
+      const sx=x+w/2+Math.cos(ang)*w*0.75, sy=y+h/2+Math.sin(ang*1.3)*h*0.6;
+      ctx.globalAlpha=a*(0.35+0.45*Math.sin(T*0.12+i)); ctx.fillStyle="#fff"; ctx.fillRect(sx,sy,2*sc,2*sc); } ctx.globalAlpha=a; }
+    ctx.restore();
+  }
+
+  function drawBackground(forMenu){
+    const th = forMenu ? THEMES[startTheme] : THEMES[themeIndex(highFloor)];
+    const hueShift = forMenu ? Math.sin(T*0.004)*12 : 0;
+    const hue = th.rainbow ? (T*0.7)%360 : th.bg[0]+hueShift;   // Celestial = animated rainbow
+    const g = ctx.createLinearGradient(0,0,0,H);
+    g.addColorStop(0, `hsl(${hue}, ${th.rainbow?68:55}%, ${th.bg[1]+(th.rainbow?9:5)}%)`);
+    g.addColorStop(1, `hsl(${th.rainbow?(hue+60)%360:th.bg[0]}, 55%, ${th.rainbow?12:7}%)`);
+    ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
+    // drifting flecks
+    ctx.fillStyle = "rgba(215,228,255,0.5)";
+    const off = ((forMenu? T*0.4 : cam*0.3)) % 40;
+    for (let yy=-40; yy<H+40; yy+=40) for (let xx=0; xx<W; xx+=40){
+      const px=(xx+((Math.sin(xx*12.9)*43758.5)%40)+40)%W, py=(yy+off+40)%(H+40);
+      ctx.globalAlpha=0.22; ctx.fillRect(px,py,2,2);
+    }
+    ctx.globalAlpha=1;
+  }
+  function drawWalls(forMenu){
+    const th=forMenu ? THEMES[startTheme] : THEMES[themeIndex(highFloor)];
+    let a=ctx.createLinearGradient(0,0,WALL,0); a.addColorStop(0,th.wall[0]); a.addColorStop(1,th.wall[1]);
+    ctx.fillStyle=a; ctx.fillRect(0,0,WALL,H);
+    let b=ctx.createLinearGradient(W-WALL,0,W,0); b.addColorStop(0,th.wall[1]); b.addColorStop(1,th.wall[0]);
+    ctx.fillStyle=b; ctx.fillRect(W-WALL,0,WALL,H);
+    ctx.strokeStyle="rgba(255,255,255,0.06)"; ctx.lineWidth=1;
+    const off=(-cam%28+28)%28;
+    for (let y=off; y<H; y+=28){ ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(WALL,y); ctx.moveTo(W-WALL,y); ctx.lineTo(W,y); ctx.stroke(); }
+  }
+  function drawPlatform(p){
+    const y=p.y-cam; if (y<-PLAT_H||y>H) return;
+    const th=THEMES[p.theme||0];
+    const grad=ctx.createLinearGradient(0,y,0,y+PLAT_H);
+    grad.addColorStop(0, p.floor===0?"#6fae5a":th.plat[0]); grad.addColorStop(1, p.floor===0?"#3c7a35":th.plat[1]);
+    ctx.fillStyle=grad;
+    if (th.glow){ ctx.shadowColor=th.glow; ctx.shadowBlur=12; }   // glowing themes (Neon, Crystal, Celestial…)
+    roundRect(p.x,y,p.w,PLAT_H,5); ctx.fill(); ctx.shadowBlur=0;
+    if (p.milestone){                                   // glowing checkpoint banner
+      ctx.fillStyle="rgba(255,221,120,0.95)"; ctx.fillRect(p.x,y,p.w,2);
+      ctx.fillStyle="rgba(255,236,168,0.9)"; ctx.font="bold 12px Trebuchet MS"; ctx.textAlign="center";
+      ctx.fillText("✦ FLOOR "+p.floor+" · "+th.name+" ✦", W/2, y-4);
+    }
+    ctx.fillStyle="rgba(255,255,255,0.35)"; ctx.fillRect(p.x+4,y+2,p.w-8,2);
+    if (!p.milestone && p.floor>0 && p.floor%5===0){ ctx.fillStyle="rgba(255,255,255,0.4)"; ctx.font="bold 11px Trebuchet MS"; ctx.textAlign="left"; ctx.fillText(p.floor,p.x+4,y-3); }
+  }
+  function drawPlayer(){
+    const skin = SKINS[(state==="replay" && bestRun && bestRun.skin!=null) ? bestRun.skin : selectedSkin];
+    const y=player.y-cam, sq=player.squash;
+    const w=PLAYER_W*(1-sq*0.18), h=PLAYER_H*(1+sq*0.22);
+    const x=player.x+(PLAYER_W-w)/2, yy=y+(PLAYER_H-h);
+    ctx.fillStyle="rgba(0,0,0,0.25)"; ctx.beginPath(); ctx.ellipse(player.x+PLAYER_W/2,y+PLAYER_H,PLAYER_W*0.5,5,0,0,7); ctx.fill();
+    drawCharacter(x,yy,w,h,skin,player.face,{alpha: skin.ghosty?0.65:1});
+    const spd=Math.abs(player.vx);
+    if (spd>7*PACE){ ctx.strokeStyle="rgba(190,225,255,"+Math.min(.6,spd/(20*PACE))+")"; ctx.lineWidth=2;
+      for (let i=0;i<3;i++){ const sx=x-player.face*(8+i*8); ctx.beginPath(); ctx.moveTo(sx,yy+8+i*8); ctx.lineTo(sx-player.face*10,yy+8+i*8); ctx.stroke(); } }
+  }
+  function drawParticles(){ for (const p of particles){ ctx.globalAlpha=Math.max(0,p.life); ctx.fillStyle=p.color; ctx.fillRect(p.x,p.y-cam,3,3); } ctx.globalAlpha=1; }
+
+  function drawSteerZones(){            // button+steer: faint glow of the side you're holding
+    if (controlMode!=="bsteer") return;
+    const mv = touch.active ? touch.moveX : 0;
+    if (mv < 0){ const g=ctx.createLinearGradient(0,0,100,0); g.addColorStop(0,"rgba(130,180,255,0.18)"); g.addColorStop(1,"rgba(130,180,255,0)"); ctx.fillStyle=g; ctx.fillRect(0,0,100,H); }
+    else if (mv > 0){ const g=ctx.createLinearGradient(W,0,W-100,0); g.addColorStop(0,"rgba(130,180,255,0.18)"); g.addColorStop(1,"rgba(130,180,255,0)"); ctx.fillStyle=g; ctx.fillRect(W-100,0,100,H); }
+  }
+  function tutorialLines(){
+    switch(controlMode){
+      case "desktop": return ["Arrow keys  ←  →  to move.","Space / ↑ to jump  ·  hold Shift to walk.","press Space to start"];
+      case "auto":    return isTouch ? ["Drag left / right to steer.","You jump automatically on every landing.","▾  touch & steer to start  ▾"]
+                                     : ["Arrow keys  ←  →  to steer.","You jump automatically on every landing.","press →  to start"];
+      case "swipe":  return ["Drag left / right to steer.","Flick UP to jump.","▴  flick up to start  ▴"];
+      case "bsteer": return ["Hold the left / right side to move.","Tap the JUMP button to leap.","tap JUMP to start"];
+      case "bdrag":  return ["Drag left / right to steer.","Tap the JUMP button to leap.","tap JUMP to start"];
+    }
+    return ["","",""];
+  }
+  function drawTutorial(){               // floor-0 how-to card; fades once you launch
+    if (tut <= 0) return;
+    const L = tutorialLines();
+    ctx.save(); ctx.globalAlpha = tut;
+    const cw = Math.min(W-44, 380), cx = (W-cw)/2, cy = H*0.15, ch = 132;
+    ctx.fillStyle="rgba(8,14,28,0.86)"; roundRect(cx,cy,cw,ch,12); ctx.fill();
+    ctx.strokeStyle="rgba(120,170,255,0.45)"; ctx.lineWidth=1.5; roundRect(cx,cy,cw,ch,12); ctx.stroke();
+    ctx.textAlign="center";
+    ctx.fillStyle="#ffd34d"; ctx.font="bold 16px Trebuchet MS"; ctx.fillText("HOW TO PLAY · "+controlLabel().toUpperCase(), W/2, cy+27);
+    ctx.fillStyle="#eaf2ff"; ctx.font="14px Trebuchet MS";
+    ctx.fillText(L[0], W/2, cy+58); ctx.fillText(L[1], W/2, cy+80);
+    ctx.globalAlpha = tut*(0.55+0.45*Math.sin(T*0.12));
+    ctx.fillStyle="#9fe6b0"; ctx.font="bold 15px Trebuchet MS"; ctx.fillText(L[2], W/2, cy+110);
+    ctx.restore();
+  }
+  function drawHUD(){
+    drawSteerZones();
+    ctx.textAlign="left"; ctx.fillStyle="#fff"; ctx.font="bold 26px Trebuchet MS"; ctx.fillText(Math.floor(score),36,40);
+    ctx.font="12px Trebuchet MS"; ctx.fillStyle="#8fb6e8"; ctx.fillText("FLOOR "+player.floor+"   ·   BEST "+Math.floor(best),36,58);
+    // stopwatch + speed gauge (camera speeds up every 60s) — hidden in multiplayer (match clock takes over)
+    if (state!=="mp" && state!=="mpend"){ const secs=Math.floor(runFrames/60), mm=Math.floor(secs/60), ss=("0"+(secs%60)).slice(-2), cyc=(runFrames%3600)/3600;
+      const tx=W/2, ty=30, bw=104, bx=tx-bw/2, by=ty+6;
+      const hot = cyc>0.82 && (Math.floor(T/6)%2===0);
+      ctx.textAlign="center"; ctx.font="bold 15px Trebuchet MS"; ctx.fillStyle=hot?"#ff8a6b":"#dfeaff"; ctx.fillText("⏱ "+mm+":"+ss, tx, ty);
+      ctx.fillStyle="rgba(255,255,255,0.14)"; roundRect(bx,by,bw,5,2.5); ctx.fill();
+      ctx.fillStyle=cyc>0.82?"#ff6b6b":"#7fd0ff"; roundRect(bx,by,bw*cyc,5,2.5); ctx.fill();
+      ctx.fillStyle="#8fb6e8"; ctx.font="10px Trebuchet MS"; ctx.fillText("SPEED "+(speedLevel+1), tx, by+18); }
+    if (state==="replay"){ ctx.textAlign="right"; ctx.fillStyle="#ffd34d"; ctx.font="bold 14px Trebuchet MS"; ctx.fillText("▶ REPLAY  (Esc to exit)",W-30,40); ctx.textAlign="left"; }
+    if (combo>0){
+      const bx=36,by=72,bw=160,bh=12;
+      ctx.fillStyle="rgba(255,255,255,0.15)"; roundRect(bx,by,bw,bh,6); ctx.fill();
+      ctx.fillStyle=`hsl(${Math.max(0,50-combo*1.5)},90%,55%)`; roundRect(bx,by,bw*Math.max(0,comboTimer),bh,6); ctx.fill();
+      ctx.fillStyle="#fff"; ctx.font="bold 14px Trebuchet MS"; ctx.fillText("COMBO x"+combo,bx,by-4);
+    }
+    if (bigMsgT>0 && bigMsg){ ctx.globalAlpha=Math.min(1,bigMsgT*1.5); ctx.textAlign="center"; ctx.fillStyle="#ffd34d"; ctx.font="bold 34px Trebuchet MS"; ctx.fillText(bigMsg,W/2,130-(1-bigMsgT)*20); ctx.globalAlpha=1; }
+    if (state==="play"||state==="mp"){    // tap buttons: mute + pause (top-right)
+      ctx.textAlign="center";
+      ctx.fillStyle="rgba(255,255,255,0.12)"; roundRect(W-100,12,40,28,6); ctx.fill();
+      ctx.fillStyle=muted?"#5e7aa8":"#cfe0ff"; ctx.font="15px Trebuchet MS"; ctx.fillText("♪", W-80, 31);
+      ctx.fillStyle="rgba(255,255,255,0.12)"; roundRect(W-52,12,40,28,6); ctx.fill();
+      ctx.fillStyle="#cfe0ff"; ctx.font="bold 12px Trebuchet MS"; ctx.fillText("❚❚", W-32, 30);
+      if (isButton()){          // on-screen JUMP button (bottom-right)
+        ctx.fillStyle="rgba(95,160,255,0.20)"; ctx.beginPath(); ctx.arc(JUMP_BX,JUMP_BY,JUMP_BR,0,7); ctx.fill();
+        ctx.strokeStyle=jumpBuf>0?"#cfffe0":"#9fe6b0"; ctx.lineWidth=2.5; ctx.beginPath(); ctx.arc(JUMP_BX,JUMP_BY,JUMP_BR,0,7); ctx.stroke();
+        ctx.fillStyle="#9fe6b0"; ctx.font="16px Trebuchet MS"; ctx.fillText("▲", JUMP_BX, JUMP_BY-7);
+        ctx.fillStyle="#eaf2ff"; ctx.font="bold 12px Trebuchet MS"; ctx.fillText("JUMP", JUMP_BX, JUMP_BY+13);
+      }
+    }
+  }
+
+  // ----- menu / store / friends screens -----
+  function panel(a){ ctx.fillStyle="rgba(8,14,28,"+(a==null?0.82:a)+")"; ctx.fillRect(0,0,W,H); }
+  function drawButton(x,y,w,h,label,col){
+    ctx.fillStyle="rgba(255,255,255,0.10)"; roundRect(x,y,w,h,8); ctx.fill();
+    ctx.strokeStyle=col; ctx.lineWidth=1.5; roundRect(x,y,w,h,8); ctx.stroke();
+    ctx.fillStyle=col; ctx.font="bold 16px Trebuchet MS"; ctx.textAlign="center"; ctx.textBaseline="middle";
+    ctx.fillText(label, x+w/2, y+h/2+1); ctx.textBaseline="alphabetic";
+  }
+  function backButton(){ ctx.textAlign="left"; ctx.fillStyle="#8fb6e8"; ctx.font="14px Trebuchet MS";
+    ctx.fillText("‹ Back", 24, 36); hot(16, 16, 84, 32, ()=>{ AUD.tick(); state="menu"; }); }
+  function drawTitle(cx,cy){
+    const s = 1 + Math.sin(T*0.05)*0.03;
+    ctx.save(); ctx.translate(cx,cy); ctx.scale(s,s); ctx.textAlign="left";
+    const main = "JUMP JUMP";
+    ctx.font = "bold 48px Trebuchet MS";  const mw = ctx.measureText(main).width;
+    ctx.font = "bold 26px Trebuchet MS";  const dxw = ctx.measureText("DX").width;
+    const x0 = -(mw + 10 + dxw)/2;
+    ctx.font = "bold 48px Trebuchet MS";
+    ctx.fillStyle = "rgba(0,0,0,0.35)"; ctx.fillText(main, x0+2, 4);
+    const g = ctx.createLinearGradient(0,-40,0,18); g.addColorStop(0,"#bfe9ff"); g.addColorStop(1,"#5aa0ff");
+    ctx.fillStyle = g; ctx.fillText(main, x0, 0);
+    ctx.font = "bold 26px Trebuchet MS"; ctx.fillStyle = "#ffd34d"; ctx.fillText("DX", x0+mw+10, -4);
+    ctx.restore(); ctx.textAlign = "center";
+  }
+  function flashLine(){
+    if (flashT>0){ ctx.globalAlpha=Math.min(1,flashT); ctx.textAlign="center"; ctx.fillStyle="#9fe6b0"; ctx.font="bold 15px Trebuchet MS"; ctx.fillText(flashMsg,W/2,H-40); ctx.globalAlpha=1; }
+  }
+
+  function drawMenu(){
+    drawBackground(true); drawWalls(true);
+    // animated character hopping on a pedestal
+    const bob = Math.abs(Math.sin(T*0.06))*22;
+    const px=W/2, py=H*0.46-bob;
+    ctx.fillStyle="#cfeaff"; roundRect(W/2-50,H*0.46+44,100,12,6); ctx.fill();
+    drawCharacter(px-22,py,44,58,SKINS[selectedSkin],1,{forward:true});
+    drawTitle(W/2,H*0.2);
+    ctx.textAlign="center"; ctx.fillStyle="#9bb8e0"; ctx.font="13px Trebuchet MS";
+    ctx.fillText((isTouch?"drag to steer":"arrow keys")+" · chain combos for big air", W/2, H*0.2+30);
+    { const sy=H*0.2+56, ax=110;                // music-track selector — arrows at fixed x so hit zones align
+      ctx.fillStyle="#9fe6b0"; ctx.font="bold 14px Trebuchet MS"; ctx.textAlign="center";
+      ctx.fillText("♪ Music: "+TRACKS[selectedTrack].name, W/2, sy);
+      ctx.fillStyle="#cfe0ff"; ctx.font="bold 18px Trebuchet MS";
+      ctx.fillText("◄", W/2-ax, sy); ctx.fillText("►", W/2+ax, sy);
+      hot(W/2-ax-26, sy-17, 52, 30, ()=>cycleTrack(-1));
+      hot(W/2+ax-26, sy-17, 52, 30, ()=>cycleTrack(1));
+    }
+    { const sy=H*0.2+94, ax=110;                // jump-control selector — separate row, aligned hit zones
+      ctx.fillStyle="#bcd6f7"; ctx.font="bold 14px Trebuchet MS"; ctx.textAlign="center";
+      ctx.fillText("Jump: "+controlLabel(), W/2, sy);
+      ctx.fillStyle="#cfe0ff"; ctx.font="bold 18px Trebuchet MS";
+      ctx.fillText("◄", W/2-ax, sy); ctx.fillText("►", W/2+ax, sy);
+      hot(W/2-ax-26, sy-17, 52, 30, ()=>cycleControl(-1));
+      hot(W/2+ax-26, sy-17, 52, 30, ()=>cycleControl(1));
+    }
+
+    const items=menuItems(); const baseY=H*0.62;
+    for (let i=0;i<items.length;i++){
+      const y=baseY+i*42, sel=i===menuIndex;
+      if (sel){ ctx.fillStyle="rgba(95,160,255,"+(0.2+0.1*Math.sin(T*0.1))+")"; roundRect(W/2-140,y-22,280,34,8); ctx.fill(); }
+      ctx.fillStyle=sel?"#ffffff":"#9bb8e0"; ctx.font=(sel?"bold ":"")+"20px Trebuchet MS"; ctx.textAlign="center";
+      ctx.fillText(items[i].label, W/2, y);
+      hot(W/2-140, y-22, 280, 34, ((idx)=>()=>{ menuIndex=idx; AUD.select(); activate(items[idx].id); })(i));
+    }
+    ctx.fillStyle="#5e7aa8"; ctx.font="12px Trebuchet MS";
+    ctx.fillText("Tap an option   ·   M music", W/2, H*0.62+items.length*42+14);
+    if (profile){ ctx.textAlign="right"; ctx.fillStyle="#8fb6e8"; ctx.font="12px Trebuchet MS"; ctx.fillText("◉ "+profile.name, W-30, 34); }
+    ctx.textAlign="left"; ctx.fillStyle=muted?"#5e7aa8":"#8fb6e8"; ctx.font="14px Trebuchet MS"; ctx.fillText(muted?"♪ off":"♪ on", 30, 34);
+    hot(24, 18, 72, 26, ()=>{ toggleMute(); });
+    flashLine();
+  }
+
+  function drawSkins(){
+    drawBackground(true); panel(0.86);
+    ctx.textAlign="center"; ctx.fillStyle="#fff"; ctx.font="bold 24px Trebuchet MS"; ctx.fillText("CUSTOMIZE", W/2, 46);
+    const tabY=64, tw=132;
+    [["CHARACTERS","chars",W/2-69],["FLOOR TYPES","floors",W/2+69]].forEach(t=>{
+      const sel=skinsTab===t[1];
+      ctx.fillStyle=sel?"rgba(95,160,255,0.28)":"rgba(255,255,255,0.06)"; roundRect(t[2]-tw/2,tabY,tw,26,7); ctx.fill();
+      ctx.fillStyle=sel?"#fff":"#8fb6e8"; ctx.font="bold 12px Trebuchet MS"; ctx.textAlign="center"; ctx.fillText(t[0],t[2],tabY+17);
+      hot(t[2]-tw/2,tabY,tw,26, ()=>{ if(skinsTab!==t[1]){ skinsTab=t[1]; AUD.tick(); } });
+    });
+    if (skinsTab==="chars") drawSkinsChars(); else drawSkinsFloors();
+    backButton();
+    flashLine();
+  }
+  function drawSkinsChars(){
+    const s=SKINS[skinIndex], owned=unlocked.has(skinIndex);
+    ctx.textAlign="center"; ctx.font="13px Trebuchet MS"; ctx.fillStyle="#8fb6e8";
+    ctx.fillText(s.premium?"— Support the game: premium skins —":"— Free skins —", W/2, 118);
+    drawCharacter(W/2-40, H*0.37, 80, 104, s, 1, {forward:true});
+    ctx.fillStyle="rgba(255,255,255,0.5)"; ctx.font="bold 34px Trebuchet MS";
+    ctx.fillText("‹", W/2-110, H*0.45); ctx.fillText("›", W/2+110, H*0.45);
+    ctx.fillStyle="#fff"; ctx.font="bold 24px Trebuchet MS"; ctx.fillText(s.name, W/2, H*0.59);
+    ctx.font="bold 16px Trebuchet MS";
+    if (selectedSkin===skinIndex){ ctx.fillStyle="#9fe6b0"; ctx.fillText("✓ EQUIPPED", W/2, H*0.63); }
+    else if (owned){ ctx.fillStyle="#bcd6f7"; ctx.fillText("Owned — tap to equip", W/2, H*0.63); }
+    else { ctx.fillStyle="#ffd34d"; ctx.fillText("Premium — tap to unlock ($2)", W/2, H*0.63); }
+    ctx.fillStyle="#5e7aa8"; ctx.font="12px Trebuchet MS"; ctx.fillText((skinIndex+1)+" / "+SKINS.length+"   ·   ◄ ► browse", W/2, H*0.69);
+    const n=SKINS.length, sw=Math.min(26,(W-80)/n), startX=W/2-(n*sw)/2;
+    for (let i=0;i<n;i++){ const x=startX+i*sw, y=H*0.77;
+      const c=skinColors(SKINS[i]); ctx.globalAlpha=unlocked.has(i)?1:0.4; ctx.fillStyle=c.body;
+      roundRect(x+2,y,sw-4,18,4); ctx.fill();
+      if (!unlocked.has(i)){ ctx.globalAlpha=0.9; ctx.fillStyle="#fff"; ctx.font="9px Trebuchet MS"; ctx.textAlign="center"; ctx.fillText("$", x+sw/2, y+13); }
+      ctx.globalAlpha=1;
+      if (i===skinIndex){ ctx.strokeStyle="#ffd34d"; ctx.lineWidth=2; ctx.strokeRect(x+1,y-1,sw-2,20); }
+      hot(startX+i*sw, y-4, sw, 26, ((idx)=>()=>{ skinIndex=idx; AUD.tick(); })(i));
+    }
+    hot(W/2-150, H*0.33, 70, 150, ()=>{ skinIndex=(skinIndex-1+SKINS.length)%SKINS.length; AUD.tick(); });
+    hot(W/2+80,  H*0.33, 70, 150, ()=>{ skinIndex=(skinIndex+1)%SKINS.length; AUD.tick(); });
+    hot(W/2-120, H*0.605, 240, 36, ()=>chooseSkin());
+  }
+  function drawSkinsFloors(){
+    ctx.textAlign="center"; ctx.fillStyle="#8fb6e8"; ctx.font="12px Trebuchet MS";
+    ctx.fillText("start your run in any floor type you've discovered", W/2, 118);
+    const cols=6, cw=(W-52)/cols, ch=44, x0=26, y0=134;
+    for (let i=0;i<THEMES.length;i++){
+      const cx=x0+(i%cols)*cw, cy=y0+Math.floor(i/cols)*(ch+6), disc=discovered.has(i), th=THEMES[i];
+      ctx.globalAlpha=disc?1:0.25;
+      const gr=ctx.createLinearGradient(0,cy,0,cy+ch); gr.addColorStop(0,th.plat[0]); gr.addColorStop(1,th.wall[0]);
+      ctx.fillStyle=gr;
+      if (disc&&th.glow){ ctx.shadowColor=th.glow; ctx.shadowBlur=8; }
+      roundRect(cx+2,cy,cw-4,ch,6); ctx.fill(); ctx.shadowBlur=0;
+      ctx.globalAlpha=1; ctx.textAlign="center";
+      if (disc){ ctx.fillStyle="rgba(0,0,0,0.62)"; ctx.font="bold 9px Trebuchet MS"; ctx.fillText(th.name, cx+cw/2, cy+ch/2+3); }
+      else { ctx.fillStyle="rgba(255,255,255,0.85)"; ctx.font="13px Trebuchet MS"; ctx.fillText("🔒", cx+cw/2, cy+ch/2+4); }
+      if (i===startTheme){ ctx.strokeStyle="#9fe6b0"; ctx.lineWidth=2.5; roundRect(cx+1,cy-1,cw-2,ch+2,6); ctx.stroke(); }
+      hot(cx, cy, cw, ch, ((idx)=>()=>pickFloorType(idx))(i));
+    }
+    ctx.fillStyle="#5e7aa8"; ctx.font="11px Trebuchet MS"; ctx.textAlign="center";
+    ctx.fillText("discovered "+discovered.size+" / "+THEMES.length+"  ·  reach a type once to unlock it", W/2, y0+5*(ch+6)+14);
+  }
+
+  function drawFriends(){
+    drawBackground(true); panel(0.86);
+    ctx.textAlign="center"; ctx.fillStyle="#fff"; ctx.font="bold 26px Trebuchet MS"; ctx.fillText("FRIENDS", W/2, 60);
+    if (!profile){
+      ctx.fillStyle="#bcd6f7"; ctx.font="15px Trebuchet MS";
+      ctx.fillText("Sign in with Google Play Games", W/2, H/2-30);
+      ctx.fillText("(or Game Center on iOS) to play your friends.", W/2, H/2-6);
+      ctx.fillStyle="#ffd34d"; ctx.font="bold 18px Trebuchet MS"; ctx.fillText("Press ENTER to sign in", W/2, H/2+40);
+      ctx.fillStyle="#5e7aa8"; ctx.font="11px Trebuchet MS"; ctx.fillText("(prototype — no real account used)", W/2, H/2+62);
+    } else {
+      const board=[{name:profile.name,score:Math.floor(best),me:true}, ...loadFriends()].sort((a,b)=>b.score-a.score);
+      ctx.font="15px Trebuchet MS";
+      for (let i=0;i<board.length;i++){ const r=board[i], y=120+i*40;
+        if (r.me){ ctx.fillStyle="rgba(95,160,255,0.18)"; roundRect(40,y-22,W-80,32,8); ctx.fill(); }
+        ctx.textAlign="left"; ctx.fillStyle=r.me?"#fff":"#bcd6f7"; ctx.font=(r.me?"bold ":"")+"16px Trebuchet MS";
+        ctx.fillText((i+1)+".  "+r.name, 56, y);
+        ctx.textAlign="right"; ctx.fillText(r.score, W-56, y);
+      }
+    }
+    if (profile){                               // example notifications (become push in the app)
+      ctx.textAlign="left"; ctx.fillStyle="#7f9cc8"; ctx.font="bold 12px Trebuchet MS"; ctx.fillText("RECENT", 42, 372);
+      const ex=[["🔔","Marc beat your best score (4,820)"],["🎮","Max is inviting you to play live"]];
+      for (let i=0;i<ex.length;i++){ const y=382+i*40;
+        ctx.fillStyle="rgba(95,160,255,0.10)"; roundRect(40,y,W-80,32,8); ctx.fill();
+        ctx.textAlign="left"; ctx.font="18px Trebuchet MS"; ctx.fillStyle="#ffd34d"; ctx.fillText(ex[i][0], 54, y+22);
+        ctx.font="13px Trebuchet MS"; ctx.fillStyle="#cfe0ff"; ctx.fillText(ex[i][1], 82, y+21);
+      }
+      ctx.fillStyle="#5e7aa8"; ctx.font="11px Trebuchet MS"; ctx.textAlign="center";
+      ctx.fillText("(in the app these arrive as push notifications)", W/2, 382+ex.length*40+14);
+    }
+    if (!profile) hot(W/2-140, H/2+18, 280, 42, ()=>{ signIn(); });
+    backButton();
+    flashLine();
+  }
+
+  function drawAbout(){
+    drawBackground(true); panel(0.9);
+    ctx.textAlign="center"; ctx.fillStyle="#fff"; ctx.font="bold 26px Trebuchet MS"; ctx.fillText("ABOUT", W/2, 60);
+    const bob = Math.abs(Math.sin(T*0.06))*10;
+    drawCharacter(W/2-18, 84-bob, 36, 48, SKINS[selectedSkin], 1, {forward:true});
+    const lines = [
+      ["Jump Jump DX is a love letter to one of","#cfe0ff",15],
+      ["my favourite games as a kid — the one","#cfe0ff",15],
+      ["with the endless tower and all that ice.","#cfe0ff",15],
+      ["","",10],
+      ["I just want to make a fun game to enjoy.","#bcd6f7",14],
+      ["There will never be forced ads. Ever.","#9fe6b0",15],
+      ["","",8],
+      ["Supporting the game — those optional","#bcd6f7",14],
+      ["skins — is what keeps it alive & updated.","#bcd6f7",14],
+      ["","",8],
+      ["If you're having fun, please help us","#ffd34d",16],
+      ["keep it up.  ♥","#ffd34d",16],
+    ];
+    let y = 170;
+    for (const [t,c,sz] of lines){ if (t){ ctx.fillStyle=c; ctx.font=(sz>=16?"bold ":"")+sz+"px Trebuchet MS"; ctx.fillText(t,W/2,y); } y += sz+10; }
+    ctx.fillStyle="#5e7aa8"; ctx.font="12px Trebuchet MS"; ctx.fillText("— made with ♥   ·   tap to go back", W/2, H-40);
+    backButton();
+    hot(0,0,W,H, ()=>{ AUD.tick(); state="menu"; });
+    flashLine();
+  }
+
+  function drawDead(){
+    panel();
+    ctx.textAlign="center"; ctx.fillStyle="#ff6b6b"; ctx.font="bold 40px Trebuchet MS"; ctx.fillText("GAME OVER", W/2, H/2-60);
+    ctx.fillStyle="#fff"; ctx.font="22px Trebuchet MS"; ctx.fillText("Score "+Math.floor(score), W/2, H/2-16);
+    ctx.font="15px Trebuchet MS"; ctx.fillStyle="#bcd6f7";
+    ctx.fillText("Floor "+highFloor+"   ·   Best combo x"+bestCombo, W/2, H/2+12);
+    ctx.fillText("Best score "+Math.floor(best), W/2, H/2+34);
+    drawButton(W/2-122, H/2+62, 112, 40, "RETRY", "#ffd34d");
+    drawButton(W/2+10,  H/2+62, 112, 40, "MENU",  "#9bb8e0");
+    hot(W/2-122, H/2+62, 112, 40, ()=>startPlay());
+    hot(W/2+10,  H/2+62, 112, 40, ()=>{ state="menu"; });
+  }
+
+  // ===== Multiplayer rendering ===============================================
+  function drawGhost(g){                                  // a friend's translucent "shadow"
+    const a=g.a, y=a.y-cam;
+    if (y<-50 || y>H+10) return;                          // off-screen friends show only on the minimap
+    ctx.save();
+    ctx.globalAlpha=0.40; ctx.fillStyle="#0a1018";        // dark silhouette
+    roundRect(a.x, y, PLAYER_W, PLAYER_H, 7); ctx.fill();
+    ctx.globalAlpha=0.85; ctx.lineWidth=2; ctx.strokeStyle=g.color;   // colored outline = identity
+    roundRect(a.x, y, PLAYER_W, PLAYER_H, 7); ctx.stroke();
+    ctx.globalAlpha=0.6; ctx.fillStyle=g.color;
+    const ex = a.face>0 ? a.x+PLAYER_W*0.55 : a.x+PLAYER_W*0.2;
+    ctx.fillRect(ex, y+PLAYER_H*0.25, 3, 4); ctx.fillRect(ex+(a.face>0?6:-6), y+PLAYER_H*0.25, 3, 4);
+    ctx.globalAlpha=0.95; ctx.fillStyle=g.color; ctx.font="bold 9px Trebuchet MS"; ctx.textAlign="center";
+    ctx.fillText(g.name, a.x+PLAYER_W/2, y-4);
+    ctx.restore();
+  }
+  function drawMinimap(){                                 // discrete height ladder on the right wall
+    if (!mp) return;
+    const x=W-19, w=11, top=104, bot=H-72, h=bot-top;
+    let maxF = mp.mode==="race" ? mp.target : 50;
+    for (const g of mp.ghosts) if (g.highFloor>maxF) maxF=g.highFloor;
+    if (highFloor>maxF) maxF=highFloor;
+    maxF = Math.max(20, maxF);
+    ctx.fillStyle="rgba(10,18,34,0.62)"; roundRect(x,top,w,h,5); ctx.fill();
+    ctx.strokeStyle="rgba(140,182,232,0.30)"; ctx.lineWidth=1; roundRect(x,top,w,h,5); ctx.stroke();
+    const fy = f => bot - Math.min(1, f/maxF) * h;
+    if (mp.mode==="race"){ ctx.fillStyle="#ffd34d"; ctx.fillRect(x-3, fy(mp.target)-1, w+6, 2); }  // finish line
+    for (const g of mp.ghosts){ ctx.globalAlpha=0.95; ctx.fillStyle=g.color;
+      ctx.beginPath(); ctx.arc(x+w/2, fy(g.highFloor), 3.4, 0, 7); ctx.fill(); }
+    ctx.globalAlpha=1;
+    const py=fy(player.floor); ctx.fillStyle="#fff";    // you = white chevron (current position)
+    ctx.beginPath(); ctx.moveTo(x-3,py); ctx.lineTo(x+w/2+1,py-4); ctx.lineTo(x+w/2+1,py+4); ctx.closePath(); ctx.fill();
+    ctx.fillStyle="#8fb6e8"; ctx.font="8px Trebuchet MS"; ctx.textAlign="center"; ctx.fillText("▲", x+w/2, top-3);
+  }
+  function drawMpHud(){
+    if (!mp) return;
+    ctx.textAlign="center";
+    if (mp.mode==="race"){
+      ctx.fillStyle="#ffd34d"; ctx.font="bold 13px Trebuchet MS";
+      ctx.fillText("⚔ RACE · FLOOR "+player.floor+" / "+mp.target, W/2, 94);
+    } else {
+      const left=Math.max(0, mp.timeLimit-mp.frame), s=Math.ceil(left/60), mm=Math.floor(s/60), ss=("0"+(s%60)).slice(-2);
+      const warn = s<=10 && (Math.floor(T/6)%2===0);
+      ctx.fillStyle=warn?"#ff6b6b":"#ffd34d"; ctx.font="bold 15px Trebuchet MS";
+      ctx.fillText("⏱ "+mm+":"+ss+"  ·  SCORE RUSH", W/2, 94);
+    }
+    if (mp.youDeaths){ ctx.fillStyle="#8fb6e8"; ctx.font="11px Trebuchet MS";
+      ctx.fillText("↺ "+mp.youDeaths+(mp.youDeaths===1?" fall":" falls"), W/2, 110); }
+  }
+  function drawLobby(){
+    drawBackground(true); panel(0.88);
+    ctx.textAlign="center"; ctx.fillStyle="#fff"; ctx.font="bold 23px Trebuchet MS"; ctx.fillText("PLAY WITH FRIENDS", W/2, 50);
+    ctx.fillStyle="#8fb6e8"; ctx.font="12px Trebuchet MS"; ctx.fillText("same tower · friend shadows · height minimap", W/2, 70);
+    const modes=[["race","⚔  RACE","First to floor "+mpTarget],["time","⏱  SCORE RUSH","Most points in 5:00"]];
+    for (let i=0;i<2;i++){ const m=modes[i], y=88+i*78, sel=mpMode===m[0];
+      ctx.fillStyle=sel?"rgba(95,160,255,0.22)":"rgba(255,255,255,0.05)"; roundRect(40,y,W-80,66,10); ctx.fill();
+      ctx.strokeStyle=sel?"#9fe6b0":"rgba(255,255,255,0.12)"; ctx.lineWidth=sel?2:1; roundRect(40,y,W-80,66,10); ctx.stroke();
+      ctx.textAlign="left"; ctx.fillStyle=sel?"#fff":"#cfe0ff"; ctx.font="bold 18px Trebuchet MS"; ctx.fillText(m[1],58,y+28);
+      ctx.fillStyle="#9bb8e0"; ctx.font="13px Trebuchet MS"; ctx.fillText(m[2],58,y+50);
+      hot(40,y,W-80,66, ((mm)=>()=>{ if(mpMode!==mm){ mpMode=mm; LS.set("jjdx_mpmode",mm); AUD.tick(); } })(m[0]));
+    }
+    if (mpMode==="race"){ const y=88;                    // target-floor stepper on the race card
+      ctx.textAlign="center";
+      ctx.fillStyle="rgba(255,255,255,0.10)"; roundRect(W-152,y+18,30,30,7); ctx.fill();
+      ctx.fillStyle="#fff"; ctx.font="bold 20px Trebuchet MS"; ctx.fillText("−",W-137,y+39);
+      ctx.fillStyle="#ffd34d"; ctx.font="bold 22px Trebuchet MS"; ctx.fillText(mpTarget,W-94,y+40);
+      ctx.fillStyle="rgba(255,255,255,0.10)"; roundRect(W-70,y+18,30,30,7); ctx.fill();
+      ctx.fillStyle="#fff"; ctx.font="bold 20px Trebuchet MS"; ctx.fillText("+",W-55,y+39);
+      hot(W-152,y+14,34,38, ()=>{ mpTarget=Math.max(25,mpTarget-25); LS.set("jjdx_mptarget",mpTarget); AUD.tick(); });
+      hot(W-72, y+14,34,38, ()=>{ mpTarget=Math.min(500,mpTarget+25); LS.set("jjdx_mptarget",mpTarget); AUD.tick(); });
+    }
+    // ---- invite friends — in the app these are your real Google Play Games / Game Center friends ----
+    ctx.textAlign="left"; ctx.fillStyle="#7f9cc8"; ctx.font="bold 12px Trebuchet MS"; ctx.fillText("INVITE FRIENDS", 44, 260);
+    ctx.textAlign="right";
+    if (profile){ ctx.fillStyle="#9fe6b0"; ctx.font="11px Trebuchet MS"; ctx.fillText("◉ "+profile.name, W-44, 260); }
+    else { ctx.fillStyle="#ffd34d"; ctx.font="bold 11px Trebuchet MS"; ctx.fillText("🎮 Sign in ›", W-44, 260);
+           hot(W-130, 247, 88, 18, ()=>{ signIn(); }); }
+    const fr=loadFriends().slice(0,4);
+    for (let i=0;i<fr.length;i++){ const y=272+i*38, col=GHOST_COLORS[i%GHOST_COLORS.length], inv=mpInvited.has(i);
+      ctx.fillStyle = inv ? "rgba(95,160,255,0.14)" : "rgba(255,255,255,0.04)"; roundRect(40,y,W-80,32,8); ctx.fill();
+      if (inv){ ctx.strokeStyle="rgba(159,230,176,0.45)"; ctx.lineWidth=1; roundRect(40,y,W-80,32,8); ctx.stroke(); }
+      ctx.beginPath(); ctx.arc(60,y+16,8,0,7); ctx.lineWidth=2; ctx.strokeStyle=inv?"#9fe6b0":"#5e7aa8"; ctx.stroke();   // invite checkbox
+      if (inv){ ctx.fillStyle="#9fe6b0"; ctx.font="bold 11px Trebuchet MS"; ctx.textAlign="center"; ctx.fillText("✓",60,y+20); }
+      ctx.fillStyle=col; ctx.beginPath(); ctx.arc(84,y+16,5,0,7); ctx.fill();                                          // their shadow colour
+      ctx.textAlign="left"; ctx.fillStyle=inv?"#eaf2ff":"#8fa8c8"; ctx.font="14px Trebuchet MS"; ctx.fillText(fr[i].name, 100, y+21);
+      ctx.textAlign="right"; ctx.fillStyle=inv?"#9fe6b0":"#7f9cc8"; ctx.font="11px Trebuchet MS"; ctx.fillText(inv?"invited":"tap to invite", W-56, y+21);
+      hot(40,y,W-80,32, ((idx)=>()=>{ if(mpInvited.has(idx))mpInvited.delete(idx); else mpInvited.add(idx); AUD.tick(); })(i));
+    }
+    ctx.fillStyle="#5e7aa8"; ctx.font="10px Trebuchet MS"; ctx.textAlign="center";
+    ctx.fillText("in the app: invite real friends via Google Play Games · Game Center", W/2, 272+4*38+8);
+    drawButton(W/2-110, H-78, 220, 46, "START MATCH", "#9fe6b0");
+    hot(W/2-110, H-78, 220, 46, ()=>{ AUD.select(); startMatch(); });
+    backButton(); flashLine();
+  }
+  function drawMpEnd(){
+    if (!mp || !mp.results) return;
+    panel(0.86); ctx.textAlign="center";
+    const win = mp.youPlace===1;
+    ctx.fillStyle=win?"#9fe6b0":"#ffd34d"; ctx.font="bold 30px Trebuchet MS";
+    ctx.fillText(win?"YOU WIN!":"#"+mp.youPlace+" PLACE", W/2, 86);
+    ctx.fillStyle="#bcd6f7"; ctx.font="14px Trebuchet MS";
+    ctx.fillText((mp.mode==="race" ? ("Race to floor "+mp.target) : "Score Rush · 5:00") + (mp.youDeaths?("  ·  "+mp.youDeaths+(mp.youDeaths===1?" fall":" falls")):""), W/2, 110);
+    for (let i=0;i<mp.results.length;i++){ const r=mp.results[i], y=150+i*44;
+      if (r.you){ ctx.fillStyle="rgba(95,160,255,0.18)"; roundRect(36,y-24,W-72,38,9); ctx.fill(); }
+      ctx.textAlign="left"; ctx.font="bold 16px Trebuchet MS"; ctx.fillStyle=r.place===1?"#ffd34d":"#9bb8e0";
+      ctx.fillText("#"+r.place, 50, y);
+      if (!r.you){ ctx.fillStyle=r.color; ctx.beginPath(); ctx.arc(86,y-5,6,0,7); ctx.fill(); }
+      else { ctx.fillStyle="#fff"; ctx.beginPath(); ctx.moveTo(80,y-1); ctx.lineTo(90,y-9); ctx.lineTo(90,y+1); ctx.closePath(); ctx.fill(); }
+      ctx.fillStyle=r.you?"#fff":"#cfe0ff"; ctx.font=(r.you?"bold ":"")+"16px Trebuchet MS";
+      ctx.fillText(r.you?(r.name+" (you)"):r.name, 102, y);
+      ctx.textAlign="right"; ctx.fillStyle="#bcd6f7"; ctx.font="14px Trebuchet MS";
+      ctx.fillText(mp.mode==="race" ? ("floor "+r.floor) : (r.score+" pts"), W-50, y);
+    }
+    const by=150+mp.results.length*44+12;
+    if (mp.online){
+      drawButton(W/2-122, by, 112, 42, "ROOM", "#9fe6b0");
+      drawButton(W/2+10,  by, 112, 42, "LEAVE", "#9bb8e0");
+      hot(W/2-122, by, 112, 42, ()=>{ AUD.select(); state="online"; });   // back to lobby — host can start again
+      hot(W/2+10,  by, 112, 42, ()=>{ AUD.tick(); leaveOnline(); });
+    } else {
+      drawButton(W/2-122, by, 112, 42, "PLAY AGAIN", "#9fe6b0");
+      drawButton(W/2+10,  by, 112, 42, "MENU", "#9bb8e0");
+      hot(W/2-122, by, 112, 42, ()=>{ AUD.select(); startMatch(); });
+      hot(W/2+10,  by, 112, 42, ()=>{ AUD.tick(); state="menu"; mp=null; });
+    }
+  }
+
+  // ===== Main loop ===========================================================
+  // ===== Online multiplayer (real friends over a WebSocket relay) ============
+  let net = null, online = null;
+  function myName(){ return (profile && profile.name) || "Player"; }
+  function showCodeInput(){ if (codeinEl){ codeinEl.value=""; codeinEl.style.display="block"; setTimeout(()=>{ try{codeinEl.focus();}catch(_){} },0); } }
+  function hideCodeInput(){ if (codeinEl) codeinEl.style.display="none"; }
+  function netSend(o){ try{ if (net && net.readyState===1) net.send(JSON.stringify(o)); }catch(_){} }
+  // Public always-on relay (set after cloud deploy). Empty string = use the local dev server.
+  const NET_SERVER = "";   // e.g. "wss://jumpjumpdx.onrender.com"
+  function netURL(){
+    const host = location.hostname || "localhost";
+    const isLocal = host==="localhost" || host==="127.0.0.1" ||
+      /^192\.168\./.test(host) || /^10\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host) || /^169\.254\./.test(host);
+    // On a public/https page, always use the cloud relay (an https page cannot open a plain ws://).
+    if (NET_SERVER && (!isLocal || location.protocol==="https:")) return NET_SERVER;
+    return (location.protocol==="https:" ? "wss://" : "ws://") + host + ":8781";
+  }
+  function netConnect(onOpen){
+    online = online || { status:"", players:[] };
+    if (net && net.readyState===1){ online.status="connected"; if(onOpen)onOpen(); return; }
+    online.status="connecting"; online.error="";
+    try{ net = new WebSocket(netURL()); }catch(e){ online.status="error"; return; }
+    net.onopen   = ()=>{ if(online) online.status="connected"; if(onOpen)onOpen(); };
+    net.onclose  = ()=>{ if(online) online.status="closed"; };
+    net.onerror  = ()=>{ if(online) online.status="error"; };
+    net.onmessage= e=>{ try{ netHandle(JSON.parse(e.data)); }catch(_){} };
+  }
+  function createRoom(){ netConnect(()=> netSend({t:"create", name:myName()})); }
+  function joinRoom(code){ netConnect(()=> netSend({t:"join", code:(code||"").toUpperCase(), name:myName()})); }
+  function leaveOnline(){ netSend({t:"leave"}); if(net){ try{net.close();}catch(_){} } net=null; hideCodeInput(); online=null; mp=null; state="menu"; }
+  function netHandle(m){
+    if (!online) online={status:"connected",players:[]};
+    if (m.t==="room"){ online.code=m.code; online.you=m.you; online.host=m.host; online.mode=m.mode; online.target=m.target; online.players=m.players||[]; online.joinMode=false; online.error=""; hideCodeInput(); AUD.select(); }
+    else if (m.t==="players"){ online.players=m.players||[]; }
+    else if (m.t==="mode"){ online.mode=m.mode; online.target=m.target; }
+    else if (m.t==="start"){ startOnlineMatch(m); }
+    else if (m.t==="peer"){ const g=online.peerMap&&online.peerMap[m.id]; if(g){ (g.buf=g.buf||[]).push({t:performance.now(), x:m.x, y:m.y, floor:m.floor, face:m.face}); if(g.buf.length>16) g.buf.shift(); g.score=m.score||0; g.alive=m.alive!==false; } }
+    else if (m.t==="result"){ showOnlineResult(m); }
+    else if (m.t==="error"){ online.error=m.msg; }
+  }
+  function startOnlineMatch(m){
+    reset((m.seed>>>0), startTheme); recording=[]; replay=null;
+    mp = { mode:m.mode, target:m.target, timeLimit:5*60*60, frame:0, over:false, youDeaths:0, online:true, sentFinish:false, ghosts:[] };
+    online.peerMap = {};
+    (m.players||[]).forEach(p=>{ if(p.id!==online.you){
+      const g={ id:p.id, name:p.name, color:p.color, a:makeActorAtStart(0), highFloor:0, score:0, alive:true, buf:[] };
+      mp.ghosts.push(g); online.peerMap[p.id]=g;
+    }});
+    started=true; jumpBuf=0; state="mp"; updateHint();
+  }
+  // render a peer ~PEER_DELAY ms in the past, interpolating between buffered network samples (smooth despite jitter/loss)
+  function interpPeer(g, now){
+    const buf=g.buf; if (!buf || !buf.length) return;
+    const rt = now - 100;
+    let i=0; while (i<buf.length-1 && buf[i+1].t<=rt) i++;
+    const a=buf[i], b=(i+1<buf.length)?buf[i+1]:a;
+    let x=a.x, y=a.y, fl=a.floor, fc=a.face;
+    if (b!==a && b.t>a.t){ const f=Math.max(0,Math.min(1,(rt-a.t)/(b.t-a.t))); x=a.x+(b.x-a.x)*f; y=a.y+(b.y-a.y)*f; fl=b.floor; fc=b.face; }
+    g.a.x=x; g.a.y=y; g.a.floor=fl; if(fc) g.a.face=fc;
+    g.highFloor=Math.max(g.highFloor, fl||0);
+  }
+  function showOnlineResult(m){
+    if (!mp){ state="menu"; return; }
+    mp.over=true;
+    const sb={}; (m.standings||[]).forEach(s=>{ sb[s.id]=s; });   // server's authoritative finish floor/score, by id
+    const me=online.you;
+    const you={ you:true, name:myName(), color:"#fff",
+                floor:(sb[me]?sb[me].floor:highFloor), score:(sb[me]?sb[me].score:Math.floor(Math.max(score,0))) };
+    const rows=[you].concat(mp.ghosts.map(g=>({ you:false, name:g.name, color:g.color,
+                floor:(sb[g.id]?sb[g.id].floor:g.highFloor), score:(sb[g.id]?sb[g.id].score:Math.floor(g.score||0)) })));
+    if (mp.mode==="race") rows.sort((a,b)=> b.floor-a.floor); else rows.sort((a,b)=> b.score-a.score);
+    rows.forEach((r,i)=> r.place=i+1);
+    mp.results=rows; mp.youPlace=(rows.find(r=>r.you)||{}).place||rows.length;
+    if (mp.youPlace===1) AUD.fanfare(); else AUD.gameOver();
+    state="mpend";
+  }
+  if (codeinEl) codeinEl.addEventListener("keydown", e=>{ if(e.key==="Enter"){ const c=(codeinEl.value||"").toUpperCase(); if(c.length>=3) joinRoom(c); } });
+
+  function drawOnline(){
+    drawBackground(true); panel(0.9);
+    ctx.textAlign="center"; ctx.fillStyle="#fff"; ctx.font="bold 24px Trebuchet MS"; ctx.fillText("ONLINE", W/2, 52);
+    if (online && online.code){                          // ---- room lobby ----
+      ctx.fillStyle="#8fb6e8"; ctx.font="13px Trebuchet MS"; ctx.fillText("share this code with friends on your Wi-Fi", W/2, 78);
+      ctx.fillStyle="#ffd34d"; ctx.font="bold 46px Trebuchet MS"; ctx.fillText(online.code, W/2, 128);
+      ctx.textAlign="left"; ctx.fillStyle="#7f9cc8"; ctx.font="bold 12px Trebuchet MS"; ctx.fillText("PLAYERS ("+online.players.length+")", 44, 160);
+      for (let i=0;i<online.players.length;i++){ const p=online.players[i], y=172+i*32;
+        ctx.fillStyle="rgba(95,160,255,0.08)"; roundRect(40,y,W-80,27,7); ctx.fill();
+        ctx.fillStyle=p.color; ctx.beginPath(); ctx.arc(60,y+14,7,0,7); ctx.fill();
+        ctx.textAlign="left"; ctx.fillStyle="#eaf2ff"; ctx.font="14px Trebuchet MS"; ctx.fillText(p.name+(p.id===online.you?" (you)":""), 78, y+19);
+        if (p.host){ ctx.textAlign="right"; ctx.fillStyle="#9fe6b0"; ctx.font="11px Trebuchet MS"; ctx.fillText("host", W-56, y+19); }
+      }
+      const yb = 178 + Math.max(online.players.length,1)*32;
+      ctx.textAlign="center";
+      if (online.host){
+        const modes=[["race","⚔ RACE  ·  floor "+online.target],["time","⏱ SCORE RUSH · 5:00"]];
+        for (let i=0;i<2;i++){ const m=modes[i], y=yb+i*46, sel=online.mode===m[0];
+          ctx.fillStyle=sel?"rgba(95,160,255,0.22)":"rgba(255,255,255,0.05)"; roundRect(40,y,W-80,38,8); ctx.fill();
+          ctx.strokeStyle=sel?"#9fe6b0":"rgba(255,255,255,0.12)"; ctx.lineWidth=sel?2:1; roundRect(40,y,W-80,38,8); ctx.stroke();
+          ctx.fillStyle=sel?"#fff":"#cfe0ff"; ctx.font="bold 14px Trebuchet MS"; ctx.textAlign="left"; ctx.fillText(m[1], 58, y+24);
+          hot(40,y,W-80,38, ((mm)=>()=>{ netSend({t:"setmode", mode:mm, target:online.target}); AUD.tick(); })(m[0]));
+        }
+        if (online.mode==="race"){ const y=yb; ctx.textAlign="center";
+          ctx.fillStyle="rgba(255,255,255,0.10)"; roundRect(W-150,y+5,28,28,6); ctx.fill(); roundRect(W-72,y+5,28,28,6); ctx.fill();
+          ctx.fillStyle="#fff"; ctx.font="bold 18px Trebuchet MS"; ctx.fillText("−",W-136,y+25); ctx.fillText("+",W-58,y+25);
+          hot(W-152,y+2,34,34, ()=>{ netSend({t:"setmode",mode:"race",target:Math.max(25,online.target-25)}); AUD.tick(); });
+          hot(W-74, y+2,34,34, ()=>{ netSend({t:"setmode",mode:"race",target:Math.min(500,online.target+25)}); AUD.tick(); });
+        }
+        const can = online.players.length>=2;
+        drawButton(W/2-120, H-94, 240, 50, can?"START MATCH":"NEED 2+ PLAYERS…", can?"#9fe6b0":"#5e7aa8");
+        if (can) hot(W/2-120, H-94, 240, 50, ()=>{ AUD.select(); netSend({t:"start"}); });
+      } else {
+        ctx.fillStyle="#bcd6f7"; ctx.font="15px Trebuchet MS"; ctx.fillText(online.mode==="race"?("⚔ Race to floor "+online.target):"⏱ Score Rush · 5:00", W/2, yb+24);
+        ctx.fillStyle="#9fe6b0"; ctx.font="bold 16px Trebuchet MS"; ctx.fillText("waiting for the host to start…", W/2, H-100);
+      }
+    } else {                                             // ---- connect / create / join ----
+      const st = online ? online.status : "";
+      ctx.fillStyle = st==="connected"?"#9fe6b0":(st==="error"||st==="closed")?"#ff8a6b":"#8fb6e8"; ctx.font="13px Trebuchet MS";
+      ctx.fillText(st==="connected"?"connected ✓":st==="connecting"?"connecting…":st==="error"?"can't reach server — is server.py running?":st==="closed"?"disconnected":"live race with friends on the same Wi-Fi", W/2, 86);
+      if (online && online.error){ ctx.fillStyle="#ff6b6b"; ctx.font="bold 14px Trebuchet MS"; ctx.fillText(online.error, W/2, 112); }
+      if (online && online.joinMode){
+        ctx.fillStyle="#8fb6e8"; ctx.font="13px Trebuchet MS"; ctx.fillText("type your friend's 4-letter code ↑", W/2, H*0.52);
+        drawButton(W/2-110, H*0.52+16, 220, 50, "JOIN", "#5fb4ff");
+        hot(W/2-110, H*0.52+16, 220, 50, ()=>{ const c=(codeinEl.value||"").toUpperCase(); if(c.length>=3) joinRoom(c); });
+      } else {
+        drawButton(W/2-120, H*0.34, 240, 52, "CREATE ROOM", "#9fe6b0");
+        hot(W/2-120, H*0.34, 240, 52, ()=>{ AUD.select(); createRoom(); });
+        ctx.fillStyle="#5e7aa8"; ctx.font="12px Trebuchet MS"; ctx.fillText("— or —", W/2, H*0.34+82);
+        drawButton(W/2-120, H*0.34+100, 240, 52, "JOIN A ROOM", "#5fb4ff");
+        hot(W/2-120, H*0.34+100, 240, 52, ()=>{ AUD.select(); online=online||{status:"",players:[]}; online.joinMode=true; netConnect(); showCodeInput(); });
+      }
+    }
+    ctx.textAlign="left"; ctx.fillStyle="#8fb6e8"; ctx.font="14px Trebuchet MS"; ctx.fillText("‹ Back", 24, 36);
+    hot(16,16,84,32, ()=>{ AUD.tick(); if (online && online.joinMode && !online.code){ online.joinMode=false; hideCodeInput(); } else leaveOnline(); });
+  }
+
+  // Fixed-timestep loop: simulate at a constant 60Hz of REAL time, render once per displayed
+  // frame. Decouples game speed from refresh rate, so dropped frames skip rendering instead of
+  // slowing the game (no more "slow-mo" under load, no 2x-fast on 120Hz / uncapped displays).
+  const SIM_DT = 1000/60;
+  let _lastT = 0, _acc = 0;
+  function frame(now){
+    if (!_lastT) _lastT = now;
+    let dt = now - _lastT; _lastT = now;
+    if (dt > 250) dt = 250;                 // clamp big gaps (tab switch / hitch) — avoid spiral
+    _acc += dt;
+    let steps = 0;
+    while (_acc >= SIM_DT && steps < 5){     // catch up in fixed steps (capped so we never spiral)
+      T++;
+      if (flashT>0) flashT-=0.016;
+      update();
+      _acc -= SIM_DT; steps++;
+    }
+
+    hotspots.length = 0;                     // render exactly once per displayed frame
+    if (codeinEl && !(state==="online" && online && online.joinMode && !online.code)) codeinEl.style.display="none";
+    if (state==="menu"){ drawMenu(); hintEl.style.opacity=0; }
+    else if (state==="online"){ drawOnline(); hintEl.style.opacity=0; }
+    else if (state==="lobby"){ drawLobby(); hintEl.style.opacity=0; }
+    else if (state==="skins"){ drawSkins(); hintEl.style.opacity=0; }
+    else if (state==="friends"){ drawFriends(); hintEl.style.opacity=0; }
+    else if (state==="about"){ drawAbout(); hintEl.style.opacity=0; }
+    else {
+      hintEl.style.opacity = (state==="play"||state==="mp")?1:0;
+      ctx.save();
+      if (shakeT>0) ctx.translate((Math.random()-.5)*shakeT*16,(Math.random()-.5)*shakeT*16);
+      drawBackground(false); drawWalls();
+      for (const p of platforms) drawPlatform(p);
+      drawParticles();
+      if ((state==="mp"||state==="mpend") && mp){ for (const g of mp.ghosts) drawGhost(g); }
+      drawPlayer();
+      ctx.restore();
+      drawHUD();
+      if (state==="play") drawTutorial();
+      if ((state==="mp"||state==="mpend") && mp){ drawMpHud(); drawMinimap(); }
+      if (state==="dead") drawDead();
+      if (state==="mpend") drawMpEnd();
+    }
+    drawToast();
+    requestAnimationFrame(frame);
+  }
+
+  reset(1); state = "menu";   // build a world so background draws; stay on menu
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+# One-click Render deploy for the Jump Jump DX multiplayer relay.
+# In Render: New + > Blueprint > point at this repo. Render injects $PORT automatically.
+services:
+  - type: web
+    name: jumpjumpdx-server
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
+    healthCheckPath: /
