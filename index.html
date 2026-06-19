@@ -1283,8 +1283,8 @@
   function showCodeInput(){ if (codeinEl){ codeinEl.value=""; codeinEl.style.display="block"; setTimeout(()=>{ try{codeinEl.focus();}catch(_){} },0); } }
   function hideCodeInput(){ if (codeinEl) codeinEl.style.display="none"; }
   function netSend(o){ try{ if (net && net.readyState===1) net.send(JSON.stringify(o)); }catch(_){} }
-  // Public always-on relay (set after cloud deploy). Empty string = use the local dev server.
-  const NET_SERVER = "";   // e.g. "wss://jumpjumpdx.onrender.com"
+  // Public always-on relay. Empty string = use the local dev server (LAN testing).
+  const NET_SERVER = "wss://jumpjumpdx-server.onrender.com";
   function netURL(){
     const host = location.hostname || "localhost";
     const isLocal = host==="localhost" || host==="127.0.0.1" ||
@@ -1293,15 +1293,34 @@
     if (NET_SERVER && (!isLocal || location.protocol==="https:")) return NET_SERVER;
     return (location.protocol==="https:" ? "wss://" : "ws://") + host + ":8781";
   }
-  function netConnect(onOpen){
+  // Ping the host's HTTP health endpoint to trigger a cold start (free tiers spin down when idle).
+  function netWake(){
+    try{
+      const u = netURL().replace(/^wss:/,"https:").replace(/^ws:/,"http:");
+      fetch(u, {mode:"no-cors", cache:"no-store"}).catch(()=>{});
+    }catch(_){}
+  }
+  let netTries = 0, netGaveUp = false;
+  function netConnect(onOpen, isRetry){
     online = online || { status:"", players:[] };
     if (net && net.readyState===1){ online.status="connected"; if(onOpen)onOpen(); return; }
-    online.status="connecting"; online.error="";
-    try{ net = new WebSocket(netURL()); }catch(e){ online.status="error"; return; }
-    net.onopen   = ()=>{ if(online) online.status="connected"; if(onOpen)onOpen(); };
-    net.onclose  = ()=>{ if(online) online.status="closed"; };
-    net.onerror  = ()=>{ if(online) online.status="error"; };
-    net.onmessage= e=>{ try{ netHandle(JSON.parse(e.data)); }catch(_){} };
+    if (!isRetry){ netTries = 0; netGaveUp = false; online._onOpen = onOpen||null; netWake(); }
+    online.status = netTries>0 ? "waking" : "connecting"; online.error="";
+    let sock;
+    try{ sock = net = new WebSocket(netURL()); }catch(e){ online.status="error"; return; }
+    sock.onopen   = ()=>{ if(sock!==net) return; netTries=0; if(online){ online.status="connected"; const f=online._onOpen; online._onOpen=null; if(f)f(); } };
+    sock.onmessage= e=>{ if(sock!==net) return; try{ netHandle(JSON.parse(e.data)); }catch(_){} };
+    sock.onerror  = ()=>{};   // onclose always follows; retry is handled there
+    sock.onclose  = ()=>{
+      if (sock!==net || !online) return;
+      if (online.status==="connected"){ online.status="closed"; return; }   // dropped after a good session
+      // never connected yet → almost certainly a cold start; keep trying for ~75s
+      netTries++;
+      if (netTries > 15){ netGaveUp = true; online.status="error"; return; }
+      online.status = "waking";
+      if (netTries % 2 === 0) netWake();   // re-poke the host periodically
+      setTimeout(()=>{ if (online && !net) { /* left */ } if (online && online.status==="waking") netConnect(online._onOpen, true); }, 4500);
+    };
   }
   function createRoom(){ netConnect(()=> netSend({t:"create", name:myName()})); }
   function joinRoom(code){ netConnect(()=> netSend({t:"join", code:(code||"").toUpperCase(), name:myName()})); }
@@ -1393,7 +1412,7 @@
     } else {                                             // ---- connect / create / join ----
       const st = online ? online.status : "";
       ctx.fillStyle = st==="connected"?"#9fe6b0":(st==="error"||st==="closed")?"#ff8a6b":"#8fb6e8"; ctx.font="13px Trebuchet MS";
-      ctx.fillText(st==="connected"?"connected ✓":st==="connecting"?"connecting…":st==="error"?"can't reach server — is server.py running?":st==="closed"?"disconnected":"live race with friends on the same Wi-Fi", W/2, 86);
+      ctx.fillText(st==="connected"?"connected ✓":st==="connecting"?"connecting…":st==="waking"?"waking up the server… (~50s on first play)":st==="error"?"can't reach server — try again in a moment":st==="closed"?"disconnected":"live race with friends — invite a code", W/2, 86);
       if (online && online.error){ ctx.fillStyle="#ff6b6b"; ctx.font="bold 14px Trebuchet MS"; ctx.fillText(online.error, W/2, 112); }
       if (online && online.joinMode){
         ctx.fillStyle="#8fb6e8"; ctx.font="13px Trebuchet MS"; ctx.fillText("type your friend's 4-letter code ↑", W/2, H*0.52);
