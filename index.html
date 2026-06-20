@@ -245,9 +245,9 @@
   const REPLAY_SPEEDS = [1, 1.5, 2, 4, 6];
   let replaySpeed = 1, _replayAcc = 0;
   // AI practice difficulty → how skilled the rival shadows are
-  const DIFFS = { easy:  { base:0.16, spread:0.10, rand:0.16, cap:0.55 },
-                  normal:{ base:0.40, spread:0.13, rand:0.22, cap:0.92 },
-                  hard:  { base:0.66, spread:0.11, rand:0.22, cap:0.99 } };
+  const DIFFS = { easy:  { base:0.16, spread:0.10, rand:0.16, cap:0.55, wall:0 },
+                  normal:{ base:0.40, spread:0.13, rand:0.22, cap:0.92, wall:0 },
+                  hard:  { base:0.66, spread:0.11, rand:0.22, cap:0.99, wall:0.16 } };   // hard rivals also wall-bounce
   let mpDiff = LS.get("jjdx_mpdiff", "normal");
   if (!DIFFS[mpDiff]) mpDiff = "normal";
 
@@ -528,13 +528,19 @@
              onGround:true, floor:0, face:1, squash:0, skid:false, lastTakeoffFloor:0, coyote:0,
              justTookOff:false, justLanded:-1, wallContact:0, wallLoud:false, _wasGround:true, spin:0, spinV:0 };
   }
-  function ghostMoveX(g){                                   // simple climbing AI for a friend shadow
-    const a=g.a;
-    const aheadN = a.onGround ? (1 + Math.round(g.skill*2)) : 1;   // skilled friends aim higher (longer combos)
+  function ghostMoveX(g){                                   // simple climbing AI for a rival shadow
+    const a=g.a, cap = 0.55 + g.skill*0.45;
+    // hard rivals occasionally commit to a wall-bounce: sprint to a wall, hit it fast, ride the lift up
+    if (g.wallRun > 0){ g.wallRun--; return g.wallDir * cap; }
+    if (a.onGround && g.wallChance && Math.random() < g.wallChance){
+      g.wallDir = (a.x + PLAYER_W/2 < (PLAY_L+PLAY_R)/2) ? 1 : -1;  // head for the FARTHER wall (room to build speed)
+      g.wallRun = 16 + (Math.random()*10|0);
+      return g.wallDir * cap;
+    }
+    const aheadN = a.onGround ? (1 + Math.round(g.skill*2)) : 1;   // skilled rivals aim higher (longer combos)
     const p = makePlatform(a.floor + aheadN);
     let m = ((p.x + p.w/2) - (a.x + PLAYER_W/2)) / 90;             // steer toward the target platform
-    m += Math.sin((T + g.tSeed) * 0.07) * (1 - g.skill) * 0.25;   // weaker friends wobble
-    const cap = 0.55 + g.skill*0.45;
+    m += Math.sin((T + g.tSeed) * 0.07) * (1 - g.skill) * 0.25;   // weaker rivals wobble
     return Math.max(-cap, Math.min(cap, m));
   }
   function startMatch(){
@@ -546,6 +552,7 @@
       name:f.name, color:GHOST_COLORS[j%GHOST_COLORS.length],
       a: makeActorAtStart((j-(fr.length-1)/2)*26),
       skill: Math.min(D.cap, D.base + j*D.spread + Math.random()*D.rand),   // difficulty sets the AI pace
+      wallChance: D.wall, wallRun:0, wallDir:1,                             // hard rivals wall-bounce now and then
       highFloor:0, score:0, combo:0, comboTimer:0, finishFrame:-1, tSeed:Math.random()*1000
     }));
     state="mp"; jumpBuf=0; started=true; updateHint();   // starts immediately (no floor-0 wait — the rivals are racing)
@@ -756,6 +763,10 @@
       } else {                                            // LOCAL: AI friend shadows
         for (const g of mp.ghosts){
           stepActor(g.a, ghostMoveX(g), true);   // friend shadows always auto-jump (AI)
+          if (g.a.y - cam > H + 60){             // fell off (e.g. a missed wall-bounce) → recover at the last milestone floor
+            const cf=Math.floor(g.highFloor/100)*100, pp=makePlatform(cf);
+            g.a.x=pp.x+pp.w/2-PLAYER_W/2; g.a.y=pp.y-PLAYER_H; g.a.vx=0; g.a.vy=0; g.a.floor=cf; g.a.onGround=true; g.a.spin=0; g.a.spinV=0; g.wallRun=0;
+          }
           if (g.a.floor>g.highFloor) g.highFloor=g.a.floor;
           if (g.a.justLanded>=0){
             const gd=g.a.justLanded - g.a.lastTakeoffFloor;
