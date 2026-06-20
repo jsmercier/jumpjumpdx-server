@@ -70,6 +70,7 @@
   const SPEED_JUMP = 0.80;   // ratio (vx → extra jump height): dimensionless, so NOT pace-scaled — keeps jump apex constant at any speed/PACE
   const JUMP_BUF = 10, COYOTE = 8;   // Celeste-style jump forgiveness (frames @60Hz): press-early buffer + late "coyote" grace after leaving the floor
   const WALL_LIFT = 0.75, WALL_LIFT_MAX = 10 * PACE;   // a fast wall-bounce WHILE FALLING converts speed→upward lift (Icy-Tower wall-climb / recovery; ratio not pace-scaled, cap is a velocity)
+  const SPIN_SPEED = RUN_MAX * 0.5;                    // bounce off a wall at least this fast → the character spins + trails
   const JUMP_BR = 36, JUMP_BX = W - 58, JUMP_BY = H - 92;   // on-screen JUMP button (Button control scheme)
   const PLAYER_W = 30, PLAYER_H = 40;
 
@@ -512,7 +513,7 @@
     for (let f = 0; f <= 14; f++) platforms.push(makePlatform(f));
     const g = platforms[0];
     player = { x: g.x + g.w/2 - PLAYER_W/2, y: g.y - PLAYER_H, vx:0, vy:0,
-               onGround:true, floor:0, face:1, squash:0, skid:false, lastTakeoffFloor:0, coyote:0 };
+               onGround:true, floor:0, face:1, squash:0, skid:false, lastTakeoffFloor:0, coyote:0, spin:0, spinV:0 };
     cam = player.y - H*0.55; scrollSpeed = 0; score = 0; runFrames = 0; speedLevel = 0; prevSpeedLevel = 0;
     combo = 0; comboTimer = 0; bestCombo = 0; highFloor = 0; curBand = 0; checkpointScore = 0;
     particles = []; shakeT = 0; bigMsg = ""; bigMsgT = 0; started = false; tut = 1;
@@ -525,7 +526,7 @@
     const g = makePlatform(0);
     return { x:g.x+g.w/2-PLAYER_W/2+(offset||0), y:g.y-PLAYER_H, vx:0, vy:0,
              onGround:true, floor:0, face:1, squash:0, skid:false, lastTakeoffFloor:0, coyote:0,
-             justTookOff:false, justLanded:-1, wallContact:0, wallLoud:false, _wasGround:true };
+             justTookOff:false, justLanded:-1, wallContact:0, wallLoud:false, _wasGround:true, spin:0, spinV:0 };
   }
   function ghostMoveX(g){                                   // simple climbing AI for a friend shadow
     const a=g.a;
@@ -631,9 +632,11 @@
     a.vy += GRAVITY; a.x += a.vx; a.y += a.vy;
 
     if (a.x < PLAY_L){ const sp=Math.abs(a.vx); a.wallLoud=sp>1.5*PACE; a.wallContact=-1; a.x=PLAY_L; a.vx=sp*0.95; a.face=1;
-      if (a.vy>0 && sp>1.5*PACE) a.vy = -Math.min(sp*WALL_LIFT, WALL_LIFT_MAX); }   // bounce while FALLING → upward lift (more time to steer)
+      if (a.vy>0 && sp>1.5*PACE) a.vy = -Math.min(sp*WALL_LIFT, WALL_LIFT_MAX);          // bounce while FALLING → upward lift (more time to steer)
+      if (sp>SPIN_SPEED) a.spinV = Math.min(0.5, 0.16 + sp*0.022); }                     // fast bounce off the LEFT wall → spin clockwise
     if (a.x+PLAYER_W > PLAY_R){ const sp=Math.abs(a.vx); a.wallLoud=sp>1.5*PACE; a.wallContact=1; a.x=PLAY_R-PLAYER_W; a.vx=-sp*0.95; a.face=-1;
-      if (a.vy>0 && sp>1.5*PACE) a.vy = -Math.min(sp*WALL_LIFT, WALL_LIFT_MAX); }
+      if (a.vy>0 && sp>1.5*PACE) a.vy = -Math.min(sp*WALL_LIFT, WALL_LIFT_MAX);
+      if (sp>SPIN_SPEED) a.spinV = -Math.min(0.5, 0.16 + sp*0.022); }                    // fast bounce off the RIGHT wall → spin counter-clockwise
 
     a.onGround=false;
     if (a.vy>=0){
@@ -653,6 +656,9 @@
     if (a.onGround) a.coyote = 0;                          // grounded → reset coyote grace
     else if (grounded0 && !a.justTookOff) a.coyote = COYOTE;   // just walked/scrolled off an edge → start the grace
     else if (a.coyote > 0) a.coyote--;                    // tick the grace down while airborne
+    // spin: a fast wall-bounce sets spinV; spin it down, then ease the rest back upright (faster once grounded)
+    if (Math.abs(a.spinV) > 0.02){ a.spin += a.spinV; a.spinV *= (a.onGround ? 0.68 : 0.92); }
+    else if (a.spin !== 0){ a.spinV = 0; a.spin = Math.atan2(Math.sin(a.spin), Math.cos(a.spin)) * (a.onGround ? 0.55 : 0.80); if (Math.abs(a.spin) < 0.02) a.spin = 0; }
   }
 
   // ===== Update ==============================================================
@@ -687,6 +693,8 @@
       spawnParticles(player.wallContact<0?PLAY_L:PLAY_R, player.y+PLAYER_H/2, 5, "#9fd0ff", 3);
       if (player.wallLoud) AUD.bounce();
     }
+    if (Math.abs(player.spinV) > 0.06)                 // sparkly trail while the character is spinning
+      spawnParticles(player.x+PLAYER_W/2, player.y+PLAYER_H/2, 2, "#bfe3ff", 1.6);
     if (player.justLanded >= 0){
       const lf = player.justLanded, gained = lf - player.lastTakeoffFloor;
       if (gained >= 2){
@@ -880,7 +888,12 @@
     const w=PLAYER_W*(1-sq*0.18), h=PLAYER_H*(1+sq*0.22);
     const x=player.x+(PLAYER_W-w)/2, yy=y+(PLAYER_H-h);
     ctx.fillStyle="rgba(0,0,0,0.25)"; ctx.beginPath(); ctx.ellipse(player.x+PLAYER_W/2,y+PLAYER_H,PLAYER_W*0.5,5,0,0,7); ctx.fill();
-    drawCharacter(x,yy,w,h,skin,player.face,{alpha: skin.ghosty?0.65:1});
+    if (player.spin){                                   // spin the sprite about its centre (shadow stays put)
+      const ccx=x+w/2, ccy=yy+h/2;
+      ctx.save(); ctx.translate(ccx,ccy); ctx.rotate(player.spin); ctx.translate(-ccx,-ccy);
+      drawCharacter(x,yy,w,h,skin,player.face,{alpha: skin.ghosty?0.65:1});
+      ctx.restore();
+    } else drawCharacter(x,yy,w,h,skin,player.face,{alpha: skin.ghosty?0.65:1});
     const spd=Math.abs(player.vx);
     if (spd>7*PACE){ ctx.strokeStyle="rgba(190,225,255,"+Math.min(.6,spd/(20*PACE))+")"; ctx.lineWidth=2;
       for (let i=0;i<3;i++){ const sx=x-player.face*(8+i*8); ctx.beginPath(); ctx.moveTo(sx,yy+8+i*8); ctx.lineTo(sx-player.face*10,yy+8+i*8); ctx.stroke(); } }
