@@ -763,9 +763,13 @@
       } else {                                            // LOCAL: AI friend shadows
         for (const g of mp.ghosts){
           stepActor(g.a, ghostMoveX(g), true);   // friend shadows always auto-jump (AI)
-          if (g.a.y - cam > H + 60){             // fell off (e.g. a missed wall-bounce) → recover at the last milestone floor
-            const cf=Math.floor(g.highFloor/100)*100, pp=makePlatform(cf);
-            g.a.x=pp.x+pp.w/2-PLAYER_W/2; g.a.y=pp.y-PLAYER_H; g.a.vx=0; g.a.vy=0; g.a.floor=cf; g.a.onGround=true; g.a.spin=0; g.a.spinV=0; g.wallRun=0;
+          // recover a rival ONLY if it truly plummeted far below its OWN best (e.g. a missed wall-bounce).
+          // NOTE: must be relative to the rival's own height, not the player's camera — else a rival you've
+          // simply out-climbed gets yanked back every frame and appears to stop going up.
+          const topY = makePlatform(g.highFloor).y - PLAYER_H;
+          if (g.a.y - topY > 9*FLOOR_H){
+            const rf=Math.max(0, g.highFloor-4), pp=makePlatform(rf);   // resume just below its peak (no infinite reset loop)
+            g.a.x=pp.x+pp.w/2-PLAYER_W/2; g.a.y=pp.y-PLAYER_H; g.a.vx=0; g.a.vy=0; g.a.floor=rf; g.a.onGround=true; g.a.spin=0; g.a.spinV=0; g.wallRun=0;
           }
           if (g.a.floor>g.highFloor) g.highFloor=g.a.floor;
           if (g.a.justLanded>=0){
