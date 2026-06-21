@@ -71,6 +71,7 @@
   const JUMP_BUF = 10, COYOTE = 8;   // Celeste-style jump forgiveness (frames @60Hz): press-early buffer + late "coyote" grace after leaving the floor
   const WALL_LIFT = 0.75, WALL_LIFT_MAX = 10 * PACE;   // a fast wall-bounce WHILE FALLING converts speed→upward lift (Icy-Tower wall-climb / recovery; ratio not pace-scaled, cap is a velocity)
   const SPIN_SPEED = RUN_MAX * 0.5;                    // bounce off a wall at least this fast → the character spins + trails
+  const SPEEDUP_FRAMES = 1800;                         // the camera ramps up one notch every 30s (1800 frames @ 60fps)
   const JUMP_BR = 36, JUMP_BX = W - 58, JUMP_BY = H - 92;   // on-screen JUMP button (Button control scheme)
   const PLAYER_W = 30, PLAYER_H = 40;
 
@@ -719,11 +720,11 @@
 
     if (started){                                         // clock + relentless rise begin only after the first jump
       runFrames++;                                        // frame-based run clock (deterministic for replays)
-      speedLevel = Math.floor(runFrames / 3600);          // camera speeds up every 60s (3600 frames @ 60fps)
-      if (speedLevel > prevSpeedLevel){                   // crossed a 60s boundary -> speed up
+      speedLevel = Math.floor(runFrames / SPEEDUP_FRAMES); // camera speeds up every 30s
+      if (speedLevel > prevSpeedLevel){                   // crossed a 30s boundary -> speed up
         prevSpeedLevel = speedLevel; flashBig("⏱ SPEEDING UP!"); AUD.alert(); shakeT = Math.max(shakeT, 0.35);
       }
-      scrollSpeed = Math.min(3.4, 0.6 + speedLevel * 0.42) * PACE; // stepwise, like the original (×PACE)
+      scrollSpeed = Math.min(3.4, 0.6 + speedLevel * 0.42) * PACE; // stepwise, like the original (×PACE); CAPPED at 3.4×PACE (≈ speedLevel 7) so it plateaus, never infinite
     }
     const desiredCam = player.y - H*0.45;
     if (desiredCam < cam) cam = desiredCam;               // keep player framed (never scroll down)
@@ -951,8 +952,8 @@
     drawSteerZones();
     ctx.textAlign="left"; ctx.fillStyle="#fff"; ctx.font="bold 26px Trebuchet MS"; ctx.fillText(Math.floor(score),36,40);
     ctx.font="12px Trebuchet MS"; ctx.fillStyle="#8fb6e8"; ctx.fillText("FLOOR "+player.floor+"   ·   BEST "+Math.floor(best),36,58);
-    // stopwatch + speed gauge (camera speeds up every 60s) — hidden in multiplayer (match clock takes over)
-    if (state!=="mp" && state!=="mpend"){ const secs=Math.floor(runFrames/60), mm=Math.floor(secs/60), ss=("0"+(secs%60)).slice(-2), cyc=(runFrames%3600)/3600;
+    // stopwatch + speed gauge (camera speeds up every 30s) — hidden in multiplayer (match clock takes over)
+    if (state!=="mp" && state!=="mpend"){ const secs=Math.floor(runFrames/60), mm=Math.floor(secs/60), ss=("0"+(secs%60)).slice(-2), cyc=(runFrames%SPEEDUP_FRAMES)/SPEEDUP_FRAMES;
       const tx=W/2, ty=30, bw=104, bx=tx-bw/2, by=ty+6;
       const hot = cyc>0.82 && (Math.floor(T/6)%2===0);
       ctx.textAlign="center"; ctx.font="bold 15px Trebuchet MS"; ctx.fillStyle=hot?"#ff8a6b":"#dfeaff"; ctx.fillText("⏱ "+mm+":"+ss, tx, ty);
