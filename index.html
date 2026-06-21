@@ -557,7 +557,7 @@
     reset(randomSeed(), startTheme); recording=[]; replay=null;
     const D = DIFFS[mpDiff] || DIFFS.normal;
     const fr = loadFriends().slice(0,4);                 // 4 AI rivals to race against
-    mp = { mode:mpMode, target:mpTarget, diff:mpDiff, timeLimit:3*60*60, frame:0, over:false, youDeaths:0, ghosts:[] };
+    mp = { mode:mpMode, target:mpTarget, diff:mpDiff, timeLimit:3*60*60, frame:0, over:false, youDeaths:0, youBest:0, ghosts:[] };
     mp.ghosts = fr.map((f,j)=>({
       name:f.name, color:GHOST_COLORS[j%GHOST_COLORS.length],
       a: makeActorAtStart((j-(fr.length-1)/2)*26),
@@ -570,7 +570,7 @@
   function endMatch(reason){
     if (!mp || mp.over) return;
     mp.over=true; mp.reason=reason;
-    const yourScore=Math.floor(score);   // reflects score-rush checkpoint rollbacks
+    const yourScore=Math.floor(mp.mode==="time" ? (mp.youBest||0) : score);   // score rush ranks by your PEAK this round
     const you={ you:true, name: profile?profile.name:"You", floor:highFloor, score:yourScore,
                 finish:(mp.mode==="race" && highFloor>=mp.target)?mp.frame:Infinity };
     const rows=[you, ...mp.ghosts.map(g=>({ you:false, name:g.name, color:g.color,
@@ -724,6 +724,9 @@
       score += (lf - prevFloor) * 10;
     }
     if (player.floor > highFloor) highFloor = player.floor;
+    // SCORE RUSH metric = the HIGHEST score reached this round. Tracked before the death rollback below,
+    // so a fall (which knocks `score` back to the checkpoint) never lowers it — only beating it does.
+    if (state==="mp" && mp && mp.mode==="time") mp.youBest = Math.max(mp.youBest||0, score);
 
     if (comboTimer > 0) { comboTimer -= 0.006; if (comboTimer <= 0){ if(combo>bestCombo)bestCombo=combo; combo=0; comboTimer=0; } }
 
@@ -765,10 +768,10 @@
       if (mp.online){                                     // ONLINE: peers are network-driven; I broadcast my own state
         const now=performance.now();
         for (const g of mp.ghosts) interpPeer(g, now);    // smooth interpolation, ~100ms behind
-        if (mp.frame % 2 === 0) netSend({t:"state", x:Math.round(player.x), y:Math.round(player.y), floor:player.floor, face:player.face, score:Math.floor(score), alive:true});   // 30 Hz
+        if (mp.frame % 2 === 0) netSend({t:"state", x:Math.round(player.x), y:Math.round(player.y), floor:player.floor, face:player.face, score:Math.floor(mp.mode==="time"?(mp.youBest||0):score), alive:true});   // 30 Hz (time mode broadcasts your PEAK)
         mp.frame++;
         if (!mp.sentFinish && ((mp.mode==="race" && highFloor>=mp.target) || (mp.mode==="time" && mp.frame>=mp.timeLimit))){
-          mp.sentFinish=true; netSend({t:"finish", floor:highFloor, score:Math.floor(score), frame:mp.frame});   // server arbitrates winner / collects scores
+          mp.sentFinish=true; netSend({t:"finish", floor:highFloor, score:Math.floor(mp.mode==="time"?(mp.youBest||0):score), frame:mp.frame});   // server arbitrates winner / collects scores (time mode reports your PEAK)
         }
       } else {                                            // LOCAL: AI friend shadows
         for (const g of mp.ghosts){
@@ -1259,7 +1262,7 @@
   }
   function drawScoreboard(){                              // live "who's leading" panel — score rush only
     if (!mp || mp.mode!=="time" || mp.over) return;
-    const rows=[{name:"You", color:"#ffffff", score:Math.floor(score), you:true},
+    const rows=[{name:"You", color:"#ffffff", score:Math.floor(mp.youBest||0), you:true},
                 ...mp.ghosts.map(g=>({name:g.name, color:g.color, score:Math.floor(g.score), you:false}))];
     rows.sort((a,b)=> b.score-a.score);
     const x=10, rh=16, w=126, y0=118, h=rows.length*rh+14;
@@ -1410,7 +1413,7 @@
   }
   function startOnlineMatch(m){
     reset((m.seed>>>0), startTheme); recording=[]; replay=null;
-    mp = { mode:m.mode, target:m.target, timeLimit:3*60*60, frame:0, over:false, youDeaths:0, online:true, sentFinish:false, ghosts:[] };
+    mp = { mode:m.mode, target:m.target, timeLimit:3*60*60, frame:0, over:false, youDeaths:0, youBest:0, online:true, sentFinish:false, ghosts:[] };
     online.peerMap = {};
     (m.players||[]).forEach(p=>{ if(p.id!==online.you){
       const g={ id:p.id, name:p.name, color:p.color, a:makeActorAtStart(0), highFloor:0, score:0, alive:true, buf:[] };
