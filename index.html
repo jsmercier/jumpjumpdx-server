@@ -50,11 +50,11 @@
   "use strict";
 
   // ===== Config ==============================================================
-  const W = 480;
+  const W = 552;   // tower widened ~15% (was 480) for more navigation room; player size unchanged → relatively more space
   // H matches the device screen's aspect so the game fills it (no letterbox = more of the tower
   // visible + more reaction room), clamped so it's never shorter than the original 2:3 nor absurdly tall.
-  const H = Math.round(Math.min(1160, Math.max(720, W * (window.innerHeight||720) / (window.innerWidth||480))));
-  const WALL = 24, PLAY_L = WALL, PLAY_R = W - WALL;
+  const H = Math.round(Math.min(1334, Math.max(828, W * (window.innerHeight||720) / (window.innerWidth||480))));
+  const WALL = 28, PLAY_L = WALL, PLAY_R = W - WALL;   // wall thickness scaled with the tower
   const FLOOR_H = 64, PLAT_H = 14;   // taller floor pitch ≈ original's ~6.6-floors-wide field
   // PACE = real-time speed multiplier. Base numbers are the 60Hz "unit" feel; motion runs PACE× faster
   // in real time while jump ARCS and platform spacing stay identical (velocities ×PACE, accelerations
@@ -108,7 +108,7 @@
   let unlocked    = new Set();
   for (let i=0;i<SKINS.length;i++) unlocked.add(i);            // all skins available for now (no purchase / sign-in gating)
   let profile     = LS.get("jjdx_profile", null);              // {name} or null
-  const PHYS_VERSION = 17;                                     // bump whenever movement/gravity/input changes
+  const PHYS_VERSION = 18;                                     // bump whenever movement/gravity/input/geometry changes
   let bestRun     = LS.get("jjdx_bestrun", null);             // {seed, inputs, score, skin, phys}
   if (bestRun && bestRun.phys !== PHYS_VERSION) bestRun = null; // old physics -> replay would desync, drop it
   let friends     = LS.get("jjdx_friends", null);
@@ -509,9 +509,9 @@
     // floor 0 and every 100th are full-width "milestone" floors (the floor type changes here)
     if (floor === 0 || floor % 100 === 0)
       return { floor, x: PLAY_L, w: PLAY_R - PLAY_L, y, theme: th, milestone: floor>0 && floor%100===0 };
-    const minW = 70, maxW = 160;
-    const shrink = Math.min(maxW - minW, Math.max(0, floor - 40) * 0.30);   // gentle: first ~100 stay wide
-    const w = Math.max(minW, Math.min(maxW, maxW - shrink + floorRand(floor,0) * 40));
+    const minW = 80, maxW = 184;                                            // scaled ~15% with the wider tower
+    const shrink = Math.min(maxW - minW, Math.max(0, floor - 40) * 0.345);   // gentle: first ~100 stay wide
+    const w = Math.max(minW, Math.min(maxW, maxW - shrink + floorRand(floor,0) * 46));
     const x = PLAY_L + floorRand(floor,1) * ((PLAY_R - PLAY_L) - w);
     return { floor, x, w, y, theme: th, milestone: false };
   }
