@@ -194,6 +194,15 @@
   }
   function toggleMute(){ muted=!muted; LS.set("jjdx_muted",muted); if (master) master.gain.setValueAtTime(muted?0:0.85, actx.currentTime); }
   function cycleTrack(dir){ selectedTrack=(selectedTrack+dir+TRACKS.length)%TRACKS.length; LS.set("jjdx_track",selectedTrack); if(actx)AUD.tick(); }
+  // Silence everything when the game loses focus (other tab, home screen, app backgrounded).
+  // The music scheduler is a setInterval that keeps feeding the Web Audio graph in the background,
+  // so suspending the AudioContext (which also freezes its clock) is what actually stops the sound.
+  function audioSleep(){ try{ if (actx && actx.state==="running") actx.suspend(); }catch(_){ } }
+  function audioWake(){  try{ if (actx && actx.state==="suspended") actx.resume(); }catch(_){ } }
+  document.addEventListener("visibilitychange", ()=>{ document.hidden ? audioSleep() : audioWake(); });
+  window.addEventListener("blur",  audioSleep);
+  window.addEventListener("focus", audioWake);
+  window.addEventListener("pagehide", audioSleep);
 
   const AUD = {
     jump(){    if(!actx||muted)return; const t=actx.currentTime; tone("square",260,t,0.14,0.16,sfxGain,560); },
