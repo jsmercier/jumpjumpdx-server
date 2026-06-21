@@ -491,7 +491,7 @@
   let runTheme = 0;                                        // theme offset for the current run (set in reset)
 
   // ----- multiplayer (prototype: local AI "shadow" friends climbing the same seeded tower) -----
-  let mpMode   = LS.get("jjdx_mpmode", "race");           // "race" = first to floor X · "time" = best score in 5:00
+  let mpMode   = LS.get("jjdx_mpmode", "race");           // "race" = first to floor X · "time" = best score in 3:00
   let mpTarget = LS.get("jjdx_mptarget", 100);            // race target floor
   const GHOST_COLORS = ["#ff7a7a","#5fb4ff","#7fe0a0","#ffd34d"];
   let mpInvited = new Set([0,1,2,3]);                     // which friends are invited (→ become your shadows). In the app these are real Play Games / Game Center friends.
@@ -557,7 +557,7 @@
     reset(randomSeed(), startTheme); recording=[]; replay=null;
     const D = DIFFS[mpDiff] || DIFFS.normal;
     const fr = loadFriends().slice(0,4);                 // 4 AI rivals to race against
-    mp = { mode:mpMode, target:mpTarget, diff:mpDiff, timeLimit:5*60*60, frame:0, over:false, youDeaths:0, ghosts:[] };
+    mp = { mode:mpMode, target:mpTarget, diff:mpDiff, timeLimit:3*60*60, frame:0, over:false, youDeaths:0, ghosts:[] };
     mp.ghosts = fr.map((f,j)=>({
       name:f.name, color:GHOST_COLORS[j%GHOST_COLORS.length],
       a: makeActorAtStart((j-(fr.length-1)/2)*26),
@@ -1257,11 +1257,30 @@
     if (mp.youDeaths){ ctx.fillStyle="#8fb6e8"; ctx.font="11px Trebuchet MS";
       ctx.fillText("↺ "+mp.youDeaths+(mp.youDeaths===1?" fall":" falls"), W/2, 110); }
   }
+  function drawScoreboard(){                              // live "who's leading" panel — score rush only
+    if (!mp || mp.mode!=="time" || mp.over) return;
+    const rows=[{name:"You", color:"#ffffff", score:Math.floor(score), you:true},
+                ...mp.ghosts.map(g=>({name:g.name, color:g.color, score:Math.floor(g.score), you:false}))];
+    rows.sort((a,b)=> b.score-a.score);
+    const x=10, rh=16, w=126, y0=118, h=rows.length*rh+14;
+    ctx.fillStyle="rgba(10,18,34,0.62)"; roundRect(x,y0,w,h,6); ctx.fill();
+    ctx.strokeStyle="rgba(140,182,232,0.25)"; ctx.lineWidth=1; roundRect(x,y0,w,h,6); ctx.stroke();
+    ctx.textAlign="left"; ctx.fillStyle="#7f9cc8"; ctx.font="bold 8px Trebuchet MS"; ctx.fillText("LEADERBOARD", x+8, y0+11);
+    for (let i=0;i<rows.length;i++){ const r=rows[i], ry=y0+18+i*rh, ty=ry+11;
+      if (r.you){ ctx.fillStyle="rgba(95,160,255,0.20)"; roundRect(x+3,ry,w-6,rh,4); ctx.fill(); }
+      ctx.textAlign="left"; ctx.fillStyle=i===0?"#ffd34d":"#9bb8e0"; ctx.font="bold 10px Trebuchet MS"; ctx.fillText((i+1)+".", x+8, ty);
+      ctx.fillStyle=r.color; ctx.beginPath(); ctx.arc(x+27, ry+rh/2, 3.4, 0, 7); ctx.fill();
+      ctx.fillStyle=r.you?"#fff":"#cfe0ff"; ctx.font=(r.you?"bold ":"")+"11px Trebuchet MS";
+      ctx.fillText(r.name.length>6?r.name.slice(0,6):r.name, x+35, ty);
+      ctx.textAlign="right"; ctx.fillStyle=r.you?"#fff":"#bcd6f7"; ctx.font="bold 10px Trebuchet MS"; ctx.fillText(r.score, x+w-8, ty);
+    }
+    ctx.textAlign="left";
+  }
   function drawLobby(){
     drawBackground(true); panel(0.88);
     ctx.textAlign="center"; ctx.fillStyle="#fff"; ctx.font="bold 23px Trebuchet MS"; ctx.fillText("PRACTICE VS AI", W/2, 50);
     ctx.fillStyle="#8fb6e8"; ctx.font="12px Trebuchet MS"; ctx.fillText("same tower · AI rivals · height minimap", W/2, 70);
-    const modes=[["race","⚔  RACE","First to floor "+mpTarget],["time","⏱  SCORE RUSH","Most points in 5:00"]];
+    const modes=[["race","⚔  RACE","First to floor "+mpTarget],["time","⏱  SCORE RUSH","Most points in 3:00"]];
     for (let i=0;i<2;i++){ const m=modes[i], y=88+i*78, sel=mpMode===m[0];
       ctx.fillStyle=sel?"rgba(95,160,255,0.22)":"rgba(255,255,255,0.05)"; roundRect(40,y,W-80,66,10); ctx.fill();
       ctx.strokeStyle=sel?"#9fe6b0":"rgba(255,255,255,0.12)"; ctx.lineWidth=sel?2:1; roundRect(40,y,W-80,66,10); ctx.stroke();
@@ -1304,7 +1323,7 @@
     ctx.fillStyle=win?"#9fe6b0":"#ffd34d"; ctx.font="bold 30px Trebuchet MS";
     ctx.fillText(win?"YOU WIN!":"#"+mp.youPlace+" PLACE", W/2, 86);
     ctx.fillStyle="#bcd6f7"; ctx.font="14px Trebuchet MS";
-    ctx.fillText((mp.mode==="race" ? ("Race to floor "+mp.target) : "Score Rush · 5:00") + (mp.youDeaths?("  ·  "+mp.youDeaths+(mp.youDeaths===1?" fall":" falls")):""), W/2, 110);
+    ctx.fillText((mp.mode==="race" ? ("Race to floor "+mp.target) : "Score Rush · 3:00") + (mp.youDeaths?("  ·  "+mp.youDeaths+(mp.youDeaths===1?" fall":" falls")):""), W/2, 110);
     for (let i=0;i<mp.results.length;i++){ const r=mp.results[i], y=150+i*44;
       if (r.you){ ctx.fillStyle="rgba(95,160,255,0.18)"; roundRect(36,y-24,W-72,38,9); ctx.fill(); }
       ctx.textAlign="left"; ctx.font="bold 16px Trebuchet MS"; ctx.fillStyle=r.place===1?"#ffd34d":"#9bb8e0";
@@ -1391,7 +1410,7 @@
   }
   function startOnlineMatch(m){
     reset((m.seed>>>0), startTheme); recording=[]; replay=null;
-    mp = { mode:m.mode, target:m.target, timeLimit:5*60*60, frame:0, over:false, youDeaths:0, online:true, sentFinish:false, ghosts:[] };
+    mp = { mode:m.mode, target:m.target, timeLimit:3*60*60, frame:0, over:false, youDeaths:0, online:true, sentFinish:false, ghosts:[] };
     online.peerMap = {};
     (m.players||[]).forEach(p=>{ if(p.id!==online.you){
       const g={ id:p.id, name:p.name, color:p.color, a:makeActorAtStart(0), highFloor:0, score:0, alive:true, buf:[] };
@@ -1443,7 +1462,7 @@
       const yb = 178 + Math.max(online.players.length,1)*32;
       ctx.textAlign="center";
       if (online.host){
-        const modes=[["race","⚔ RACE  ·  floor "+online.target],["time","⏱ SCORE RUSH · 5:00"]];
+        const modes=[["race","⚔ RACE  ·  floor "+online.target],["time","⏱ SCORE RUSH · 3:00"]];
         for (let i=0;i<2;i++){ const m=modes[i], y=yb+i*46, sel=online.mode===m[0];
           ctx.fillStyle=sel?"rgba(95,160,255,0.22)":"rgba(255,255,255,0.05)"; roundRect(40,y,W-80,38,8); ctx.fill();
           ctx.strokeStyle=sel?"#9fe6b0":"rgba(255,255,255,0.12)"; ctx.lineWidth=sel?2:1; roundRect(40,y,W-80,38,8); ctx.stroke();
@@ -1460,7 +1479,7 @@
         drawButton(W/2-120, H-94, 240, 50, can?"START MATCH":"NEED 2+ PLAYERS…", can?"#9fe6b0":"#5e7aa8");
         if (can) hot(W/2-120, H-94, 240, 50, ()=>{ AUD.select(); netSend({t:"start"}); });
       } else {
-        ctx.fillStyle="#bcd6f7"; ctx.font="15px Trebuchet MS"; ctx.fillText(online.mode==="race"?("⚔ Race to floor "+online.target):"⏱ Score Rush · 5:00", W/2, yb+24);
+        ctx.fillStyle="#bcd6f7"; ctx.font="15px Trebuchet MS"; ctx.fillText(online.mode==="race"?("⚔ Race to floor "+online.target):"⏱ Score Rush · 3:00", W/2, yb+24);
         ctx.fillStyle="#9fe6b0"; ctx.font="bold 16px Trebuchet MS"; ctx.fillText("waiting for the host to start…", W/2, H-100);
       }
     } else {                                             // ---- connect / create / join ----
@@ -1525,7 +1544,7 @@
       ctx.restore();
       drawHUD();
       if (state==="play") drawTutorial();
-      if ((state==="mp"||state==="mpend") && mp){ drawMpHud(); drawMinimap(); }
+      if ((state==="mp"||state==="mpend") && mp){ drawMpHud(); drawMinimap(); drawScoreboard(); }
       if (state==="dead") drawDead();
       if (state==="mpend") drawMpEnd();
     }
