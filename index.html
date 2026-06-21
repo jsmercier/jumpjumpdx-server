@@ -65,7 +65,7 @@
   // Super-Mario-style horizontal movement (locked-in feel)
   const WALK_MAX = 4.2 * PACE, RUN_MAX = 7.0 * PACE;   // jumps/wall-bounces stay navigable
   const GROUND_ACCEL = 0.30 * PACE*PACE, AIR_ACCEL = 0.24 * PACE*PACE;   // air control so max speed is reachable
-  const RELEASE_DECEL = 0.22 * PACE*PACE, SKID_DECEL = 0.62 * PACE*PACE;
+  const RELEASE_DECEL = 0.30 * PACE*PACE, SKID_DECEL = 0.68 * PACE*PACE;   // a bit grippier (less ice-slide on release / turns)
   const BASE_JUMP = 10.8 * PACE;
   const SPEED_JUMP = 0.80;   // ratio (vx → extra jump height): dimensionless, so NOT pace-scaled — keeps jump apex constant at any speed/PACE
   const JUMP_BUF = 10, COYOTE = 8;   // Celeste-style jump forgiveness (frames @60Hz): press-early buffer + late "coyote" grace after leaving the floor
@@ -108,7 +108,7 @@
   let unlocked    = new Set();
   for (let i=0;i<SKINS.length;i++) unlocked.add(i);            // all skins available for now (no purchase / sign-in gating)
   let profile     = LS.get("jjdx_profile", null);              // {name} or null
-  const PHYS_VERSION = 16;                                     // bump whenever movement/gravity/input changes
+  const PHYS_VERSION = 17;                                     // bump whenever movement/gravity/input changes
   let bestRun     = LS.get("jjdx_bestrun", null);             // {seed, inputs, score, skin, phys}
   if (bestRun && bestRun.phys !== PHYS_VERSION) bestRun = null; // old physics -> replay would desync, drop it
   let friends     = LS.get("jjdx_friends", null);
